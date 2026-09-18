@@ -34,7 +34,13 @@ function snapshotState(s: SimState): SimState {
 export default function Broadcast() {
   const simRef = useRef<KitchenSim | null>(null);
   if (!simRef.current) {
-    simRef.current = new KitchenSim(makeBrainFactory(null));
+    // ?shift=NN overrides shift length (useful for quick test games)
+    let shiftLength: number | undefined;
+    try {
+      const p = new URLSearchParams(window.location.search).get('shift');
+      if (p && Number(p) > 0) shiftLength = Number(p);
+    } catch {}
+    simRef.current = new KitchenSim(makeBrainFactory(null), { shiftLength });
   }
   const sim = simRef.current;
 
@@ -122,6 +128,26 @@ export default function Broadcast() {
 
   const getState = useCallback((): SimState => sim.state, [sim]);
 
+  const shiftOver = started && !snap.running && snap.t >= snap.shiftEndsAt;
+
+  // Expose the full log for analysis + download once the shift ends.
+  useEffect(() => {
+    if (!shiftOver) return;
+    try {
+      (window as unknown as Record<string, unknown>).__jevShiftLog = sim.getShiftLog();
+    } catch {}
+  }, [shiftOver, sim]);
+
+  const downloadLog = useCallback(() => {
+    const log = sim.getShiftLog();
+    const blob = new Blob([JSON.stringify(log, null, 1)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `jev-shift-log-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, [sim]);
+
   return (
     <div className="broadcast">
       <div className="col-left">
@@ -140,6 +166,52 @@ export default function Broadcast() {
           >
             <KitchenScene getState={getState} />
           </Canvas>
+          {shiftOver && (
+            <div className="end-overlay">
+              <div className="end-overlay__label">Shift Over</div>
+              <div className="end-overlay__score">{snap.score.toLocaleString()} PTS</div>
+              <div className="end-overlay__strip">
+                {snap.served} served · {snap.failed} failed · {snap.fires} fires ·{' '}
+                {snap.telemetry.reduce((a, t) => a + t.decisions, 0)} decisions · $
+                {snap.telemetry.reduce((a, t) => a + t.totalCostUsd, 0).toFixed(4)}
+              </div>
+              <table className="end-overlay__table">
+                <thead>
+                  <tr>
+                    <th>Chef</th><th>Served</th><th>Decisions</th><th>Avg ms</th><th>Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {snap.chefs.map((c, i) => {
+                    const t = snap.telemetry[i];
+                    const avg = t.latencyHistory.length
+                      ? Math.round(t.latencyHistory.reduce((a, b) => a + b, 0) / t.latencyHistory.length)
+                      : 0;
+                    return (
+                      <tr key={c.id}>
+                        <td style={{ color: c.accent }}>P{c.id + 1} {c.name}</td>
+                        <td>{c.dishesServed}</td>
+                        <td>{t.decisions}</td>
+                        <td>{avg}</td>
+                        <td>${t.totalCostUsd.toFixed(4)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div className="end-overlay__btns">
+                <button className="end-overlay__btn end-overlay__btn--primary" onClick={downloadLog}>
+                  Download Full Log
+                </button>
+                <button
+                  className="end-overlay__btn end-overlay__btn--ghost"
+                  onClick={() => window.location.reload()}
+                >
+                  Run It Back
+                </button>
+              </div>
+            </div>
+          )}
           {!started && (
             <div className="start-overlay">
               <div className="start-overlay__label">Live AI Showcase</div>

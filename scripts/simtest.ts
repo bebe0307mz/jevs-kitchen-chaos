@@ -33,7 +33,7 @@ function fail(msg: string): never {
 
 async function main(): Promise<void> {
   // zero-latency brains so decisions resolve as fast as the event loop allows
-  const sim = new KitchenSim(() => new LocalJevBrain(0));
+  const sim = new KitchenSim(() => new LocalJevBrain(0), { shiftLength: 100000 });
 
   // Longest streak (seconds) a chef sat on COMMITTED work — a claimed order or a
   // carried item — while idle and with no decision in flight. Pure waiting for

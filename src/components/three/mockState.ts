@@ -167,6 +167,7 @@ export function makeMockState(): SimState {
   return {
     t: now,
     running: true,
+    shiftEndsAt: 180,
     chefs,
     stations,
     orders,

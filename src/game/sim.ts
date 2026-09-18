@@ -1,8 +1,8 @@
 import {
   SimState, Chef, Station, Order, Item, Recipe, DishId, Ingredient,
   JevBrain, JevDecision, DecisionRequest, ActionOption, ChefTelemetry,
-  SimEvent, ChefAction, Point,
-  T, TileKind, KITCHEN_LAYOUT, GRID_W, GRID_H, RECIPES, CHEF_DEFS,
+  SimEvent, ChefAction, Point, DecisionLogEntry, ShiftLog,
+  T, TileKind, KITCHEN_LAYOUT, GRID_W, GRID_H, RECIPES, CHEF_DEFS, SHIFT_LENGTH,
 } from './types';
 // GRID_W / GRID_H are re-exported for consumers importing layout dims via sim.
 export { GRID_W, GRID_H };
@@ -50,12 +50,16 @@ export class KitchenSim {
   private nextOrderAt = 0;
   // stationId → chefId currently assigned to extinguish it (one chef per fire)
   private fireAssign = new Map<number, number>();
+  private decisionLog: DecisionLogEntry[] = [];
+  private fullEvents: SimEvent[] = [];
+  private shiftOverAnnounced = false;
 
-  constructor(makeBrain: (chefId: number) => JevBrain) {
+  constructor(makeBrain: (chefId: number) => JevBrain, opts?: { shiftLength?: number }) {
     this.makeBrain = makeBrain;
     this.state = {
       t: 0,
       running: true,
+      shiftEndsAt: opts?.shiftLength ?? SHIFT_LENGTH,
       chefs: [],
       stations: [],
       orders: [],
@@ -200,6 +204,14 @@ export class KitchenSim {
   tick(dt: number) {
     if (!this.state.running) return;
     if (dt <= 0) return;
+    if (this.state.t >= this.state.shiftEndsAt) {
+      if (!this.shiftOverAnnounced) {
+        this.shiftOverAnnounced = true;
+        this.pushEvent('info', `SHIFT OVER — final score ${this.state.score}`);
+        this.state.running = false;
+      }
+      return;
+    }
     this.state.t += dt;
     const now = this.state.t;
 
@@ -477,7 +489,17 @@ export class KitchenSim {
       .then((decision) => {
         r.telemetry.inFlight = false;
         this.recordDecision(r, decision);
-        this.applyDecision(r, decision, options);
+        const applied = this.applyDecision(r, decision, options);
+        this.decisionLog.push({
+          t: Math.round(now * 100) / 100,
+          chefId: r.chef.id,
+          chef: r.chef.name,
+          brain: r.brain.name,
+          options,
+          state: req.state,
+          decision,
+          applied,
+        });
         r.idleSince = 0;
       })
       .catch(() => {
@@ -653,12 +675,13 @@ export class KitchenSim {
       }));
   }
 
-  private applyDecision(r: ChefRt, d: JevDecision, options: ActionOption[]) {
+  private applyDecision(r: ChefRt, d: JevDecision, options: ActionOption[]): boolean {
     const valid = options.find((o) => o.id === d.chosenId);
     // if the chosen action is no longer valid (state moved on), skip; the loop
     // will re-request next tick.
-    if (!valid) return;
+    if (!valid) return false;
     this.compile(r, d.chosenId);
+    return true;
   }
 
   // ── compile a chosen action id into internal steps ─────────
@@ -1109,8 +1132,36 @@ export class KitchenSim {
   }
 
   private pushEvent(kind: SimEvent['kind'], text: string) {
-    this.state.events.push({ t: Math.round(this.state.t * 100) / 100, kind, text });
+    const ev = { t: Math.round(this.state.t * 100) / 100, kind, text };
+    this.state.events.push(ev);
+    this.fullEvents.push(ev);
     if (this.state.events.length > 30) this.state.events.shift();
+  }
+
+  // Full shift log for offline analysis of how well the brain played.
+  getShiftLog(): ShiftLog {
+    return {
+      model: this.rt[0]?.brain.name ?? 'unknown',
+      shiftLength: this.state.shiftEndsAt,
+      endedAtGameTime: Math.round(this.state.t * 100) / 100,
+      score: this.state.score,
+      served: this.state.served,
+      failed: this.state.failed,
+      fires: this.state.fires,
+      chefs: this.rt.map((r) => ({
+        id: r.chef.id,
+        name: r.chef.name,
+        served: r.chef.dishesServed,
+        decisions: r.telemetry.decisions,
+        avgLatencyMs: r.telemetry.latencyHistory.length
+          ? Math.round(r.telemetry.latencyHistory.reduce((a, b) => a + b, 0) / r.telemetry.latencyHistory.length)
+          : 0,
+        tokens: r.telemetry.totalTokens,
+        costUsd: r.telemetry.totalCostUsd,
+      })),
+      decisions: this.decisionLog,
+      events: this.fullEvents,
+    };
   }
 }
 

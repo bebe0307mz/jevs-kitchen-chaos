@@ -776,3 +776,72 @@
   .gamepad { height: 44px; }
   .tpanel__plan { min-height: 2.2em; }
 }
+
+/* shift countdown */
+.statblock__val--low { color: var(--p1); animation: lowtime 1s steps(2) infinite; }
+@keyframes lowtime { 50% { opacity: 0.55; } }
+
+/* ── End-of-shift scoreboard overlay ────────────────────────── */
+.end-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  padding: 20px;
+  background:
+    radial-gradient(ellipse 70% 55% at 50% 44%, rgba(10, 10, 15, 0.62) 0%, rgba(10, 10, 15, 0.9) 74%),
+    rgba(10, 10, 15, 0.6);
+  backdrop-filter: blur(2px);
+}
+.end-overlay__label {
+  font-family: var(--font-display), 'Archivo', sans-serif;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.34em; text-transform: uppercase;
+  color: var(--p3);
+}
+.end-overlay__score {
+  font-family: var(--font-display), 'Archivo', sans-serif;
+  font-size: clamp(38px, 5vw, 64px); font-weight: 800; line-height: 1; color: var(--text);
+}
+.end-overlay__strip {
+  font-family: var(--font-mono), 'IBM Plex Mono', monospace;
+  font-size: 12px; color: var(--dim); letter-spacing: 0.06em;
+}
+.end-overlay__table {
+  border-collapse: collapse;
+  font-family: var(--font-mono), 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  margin-top: 4px;
+}
+.end-overlay__table th {
+  font-family: var(--font-display), 'Archivo', sans-serif;
+  font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+  padding: 4px 12px; border-bottom: 1px solid var(--panel-edge); font-weight: 600;
+}
+.end-overlay__table td {
+  padding: 5px 12px; color: var(--text);
+  border-bottom: 1px solid rgba(35, 35, 46, 0.5);
+  font-variant-numeric: tabular-nums;
+}
+.end-overlay__table td:first-child { font-weight: 700; }
+.end-overlay__btns { display: flex; gap: 10px; margin-top: 10px; }
+.end-overlay__btn {
+  padding: 11px 22px;
+  font-family: var(--font-display), 'Archivo', sans-serif;
+  font-size: 12px; font-weight: 800; letter-spacing: 0.18em; text-transform: uppercase;
+  border-radius: 6px; cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease;
+}
+.end-overlay__btn--primary {
+  color: #0a0a0f; background: var(--p3); border: none;
+  box-shadow: 0 0 0 1px rgba(255, 193, 77, 0.35), 0 6px 28px rgba(255, 193, 77, 0.2);
+}
+.end-overlay__btn--primary:hover { background: #ffd077; transform: translateY(-1px); }
+.end-overlay__btn--ghost {
+  color: var(--text); background: transparent; border: 1px solid var(--panel-edge);
+}
+.end-overlay__btn--ghost:hover { border-color: var(--dim); transform: translateY(-1px); }

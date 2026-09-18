@@ -29,6 +29,10 @@ function TopBarBase({ state }: { state: SimState }) {
   const decisions = tel.reduce((a, t) => a + t.decisions, 0);
   const cost = tel.reduce((a, t) => a + t.totalCostUsd, 0);
   const totalOrders = state.served + state.failed;
+  const remaining = Math.max(0, state.shiftEndsAt - state.t);
+  const mm = Math.floor(remaining / 60);
+  const ss = Math.floor(remaining % 60).toString().padStart(2, '0');
+  const low = remaining <= 30 && remaining > 0;
 
   return (
     <header className="topbar">
@@ -39,6 +43,10 @@ function TopBarBase({ state }: { state: SimState }) {
       </div>
 
       <div className="topbar__stats">
+        <div className="statblock">
+          <span className="hud-microlabel">Shift</span>
+          <span className={`statblock__val hud-mono${low ? ' statblock__val--low' : ''}`}>{mm}:{ss}</span>
+        </div>
         <div className="statblock">
           <span className="hud-microlabel">Avg Latency</span>
           <span className="statblock__val hud-mono">{avgLatency}<span>ms</span></span>

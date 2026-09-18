@@ -172,10 +172,46 @@ export interface SimEvent {
   text: string; // e.g. "P3 served Steak (+35)"
 }
 
+// ── Shift + full game log (for studying how well Jev plays) ──
+export const SHIFT_LENGTH = 180; // seconds per shift
+
+export interface DecisionLogEntry {
+  t: number;              // game time when the decision was requested
+  chefId: number;
+  chef: string;
+  brain: string;          // 'jev-local' | 'typesafe-ai/jev'
+  options: ActionOption[];
+  state: Record<string, unknown>; // exact view sent to the brain
+  decision: JevDecision;
+  applied: boolean;       // false if state moved on and the action was invalid
+}
+
+export interface ShiftLog {
+  model: string;
+  shiftLength: number;
+  endedAtGameTime: number;
+  score: number;
+  served: number;
+  failed: number;
+  fires: number;
+  chefs: Array<{
+    id: number;
+    name: string;
+    served: number;
+    decisions: number;
+    avgLatencyMs: number;
+    tokens: number;
+    costUsd: number;
+  }>;
+  decisions: DecisionLogEntry[];
+  events: SimEvent[];     // full, uncapped event history
+}
+
 // ── Whole sim state (scene reads per-frame; HUD snapshots ~10Hz)
 export interface SimState {
   t: number;
-  running: boolean;
+  running: boolean;       // false once the shift countdown expires
+  shiftEndsAt: number;    // game time at which the shift ends
   chefs: Chef[];
   stations: Station[];
   orders: Order[];
