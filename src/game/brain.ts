@@ -150,7 +150,7 @@ export class LocalJevBrain implements JevBrain {
 }
 
 export class RemoteJevBrain implements JevBrain {
-  readonly name = 'jev-1.13';
+  readonly name = 'typesafe-ai/jev';
   private fallback = new LocalJevBrain();
 
   constructor(private endpoint: string, private apiKey: string) {}
@@ -162,7 +162,9 @@ export class RemoteJevBrain implements JevBrain {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-api-key': this.apiKey,
+          // Same-origin proxy route reads either header; empty means the
+          // server is expected to hold AI_GATEWAY_API_KEY in its env.
+          ...(this.apiKey ? { 'x-gateway-key': this.apiKey } : {}),
         },
         body: JSON.stringify({
           chefId: req.chefId,
@@ -230,7 +232,9 @@ export class RemoteJevBrain implements JevBrain {
     const tokens =
       typeof d.tokens === 'number' ? Math.round(d.tokens) : Math.round(1200 + Math.random() * 1800);
     const costUsd =
-      typeof d.cost_usd === 'number' ? d.cost_usd : tokens * 4e-8;
+      typeof d.costUsd === 'number' ? d.costUsd
+      : typeof d.cost_usd === 'number' ? d.cost_usd
+      : tokens * 4e-8;
 
     return { chosenId: chosenRaw, policy, confidence, latencyMs, tokens, costUsd };
   }
@@ -239,9 +243,9 @@ export class RemoteJevBrain implements JevBrain {
 export function makeBrainFactory(
   cfg: { endpoint?: string; apiKey?: string } | null,
 ): (chefId: number) => JevBrain {
-  if (cfg && cfg.endpoint && cfg.apiKey) {
+  if (cfg && cfg.endpoint) {
     const { endpoint, apiKey } = cfg;
-    return () => new RemoteJevBrain(endpoint, apiKey);
+    return () => new RemoteJevBrain(endpoint, apiKey ?? '');
   }
   return () => new LocalJevBrain();
 }

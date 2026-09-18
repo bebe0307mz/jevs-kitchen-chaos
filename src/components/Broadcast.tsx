@@ -8,9 +8,11 @@ import type { SimState } from '@/game/types';
 import { KitchenScene } from '@/components/three/KitchenScene';
 import { TelemetryPanel, TopBar, BottomBar } from '@/components/hud';
 
-const DEFAULT_ENDPOINT = process.env.NEXT_PUBLIC_JEV_API_URL ?? '';
+// Same-origin proxy → Vercel AI Gateway → typesafe-ai/jev.
+const DEFAULT_ENDPOINT = process.env.NEXT_PUBLIC_JEV_API_URL ?? '/api/jev-decide';
 
 const KEY_STORAGE = 'jev-api-key';
+const LIVE_BRAIN_NAME = 'typesafe-ai/jev (live via AI Gateway)';
 
 // HUD components memoize on object identity, so every 10Hz snapshot must
 // carry fresh references for anything that changes.
@@ -87,18 +89,36 @@ export default function Broadcast() {
         localStorage.setItem(KEY_STORAGE, `${endpoint}|${apiKey}`);
       } catch {}
       sim.setBrains(makeBrainFactory({ endpoint, apiKey }));
-      setBrainName('jev-1.13 (live API)');
+      setBrainName(LIVE_BRAIN_NAME);
     },
     [sim],
   );
 
-  // Restore saved key.
+  // Go live automatically when the server already holds the gateway key;
+  // otherwise restore a previously pasted key.
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(KEY_STORAGE);
-      if (saved) connectRemote(saved);
-    } catch {}
-  }, [connectRemote]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(DEFAULT_ENDPOINT, { method: 'GET' });
+        if (res.ok) {
+          const health = (await res.json()) as { configured?: boolean };
+          if (!cancelled && health.configured) {
+            sim.setBrains(makeBrainFactory({ endpoint: DEFAULT_ENDPOINT }));
+            setBrainName(LIVE_BRAIN_NAME);
+            return;
+          }
+        }
+      } catch {}
+      try {
+        const saved = localStorage.getItem(KEY_STORAGE);
+        if (saved && !cancelled) connectRemote(saved);
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sim, connectRemote]);
 
   const getState = useCallback((): SimState => sim.state, [sim]);
 
