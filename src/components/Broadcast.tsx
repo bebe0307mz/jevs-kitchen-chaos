@@ -11,8 +11,12 @@ import { TelemetryPanel, TopBar, BottomBar } from '@/components/hud';
 // Same-origin proxy → Vercel AI Gateway → typesafe-ai/jev.
 const DEFAULT_ENDPOINT = process.env.NEXT_PUBLIC_JEV_API_URL ?? '/api/jev-decide';
 
-const KEY_STORAGE = 'jev-api-key';
+const KEY_STORAGE = 'jev-gateway-key';
+const LEGACY_KEY_STORAGE = 'jev-api-key';
 const LIVE_BRAIN_NAME = 'typesafe-ai/jev (live via AI Gateway)';
+const LOCAL_BRAIN_NAME = 'jev-local (emulated)';
+
+type KeyStatus = 'none' | 'checking' | 'valid' | 'invalid';
 
 // HUD components memoize on object identity, so every 10Hz snapshot must
 // carry fresh references for anything that changes.
@@ -45,7 +49,10 @@ export default function Broadcast() {
   const sim = simRef.current;
 
   const [snap, setSnap] = useState<SimState>(() => snapshotState(sim.state));
-  const [brainName, setBrainName] = useState('jev-local (emulated)');
+  const [brainName, setBrainName] = useState(LOCAL_BRAIN_NAME);
+  const [keyStatus, setKeyStatus] = useState<KeyStatus>('none');
+  const [keyInput, setKeyInput] = useState('');
+  const [balance, setBalance] = useState<number | null>(null);
   const [started, setStarted] = useState(false);
   const startedRef = useRef(false);
   const [recordArmed, setRecordArmed] = useState(true);
@@ -138,56 +145,46 @@ export default function Broadcast() {
     return () => clearInterval(id);
   }, [sim]);
 
+  // BYOK: validate the visitor's gateway key server-side (returns credit
+  // balance), then hot-swap all four brains to the live proxy.
   const connectRemote = useCallback(
-    (raw: string) => {
-      const trimmed = raw.trim();
+    async (raw: string) => {
+      // Accept legacy "endpoint|key" pastes by keeping only the key part.
+      const trimmed = raw.trim().split('|').pop()?.trim() ?? '';
       if (!trimmed) return;
-      // Accept "key", "endpoint key" or "endpoint|key".
-      let endpoint = DEFAULT_ENDPOINT;
-      let apiKey = trimmed;
-      const sep = trimmed.includes('|') ? '|' : trimmed.includes(' ') ? ' ' : null;
-      if (sep) {
-        const [a, b] = trimmed.split(sep).map((s) => s.trim());
-        if (a.startsWith('http')) {
-          endpoint = a;
-          apiKey = b;
-        }
-      }
-      if (!endpoint) return;
+      setKeyStatus('checking');
       try {
-        localStorage.setItem(KEY_STORAGE, `${endpoint}|${apiKey}`);
-      } catch {}
-      sim.setBrains(makeBrainFactory({ endpoint, apiKey }));
-      setBrainName(LIVE_BRAIN_NAME);
+        const res = await fetch(DEFAULT_ENDPOINT, {
+          method: 'GET',
+          headers: { 'x-gateway-key': trimmed },
+        });
+        const health = (await res.json()) as { valid?: boolean; balance?: number };
+        if (!res.ok || !health.valid) {
+          setKeyStatus('invalid');
+          return;
+        }
+        try {
+          localStorage.setItem(KEY_STORAGE, trimmed);
+        } catch {}
+        sim.setBrains(makeBrainFactory({ endpoint: DEFAULT_ENDPOINT, apiKey: trimmed }));
+        setBrainName(LIVE_BRAIN_NAME);
+        setBalance(typeof health.balance === 'number' ? health.balance : null);
+        setKeyStatus('valid');
+      } catch {
+        setKeyStatus('invalid');
+      }
     },
     [sim],
   );
 
-  // Go live automatically when the server already holds the gateway key;
-  // otherwise restore a previously pasted key.
+  // Restore a previously saved key (also migrate the legacy storage format).
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(DEFAULT_ENDPOINT, { method: 'GET' });
-        if (res.ok) {
-          const health = (await res.json()) as { configured?: boolean };
-          if (!cancelled && health.configured) {
-            sim.setBrains(makeBrainFactory({ endpoint: DEFAULT_ENDPOINT }));
-            setBrainName(LIVE_BRAIN_NAME);
-            return;
-          }
-        }
-      } catch {}
-      try {
-        const saved = localStorage.getItem(KEY_STORAGE);
-        if (saved && !cancelled) connectRemote(saved);
-      } catch {}
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [sim, connectRemote]);
+    try {
+      const saved =
+        localStorage.getItem(KEY_STORAGE) ?? localStorage.getItem(LEGACY_KEY_STORAGE);
+      if (saved) void connectRemote(saved);
+    } catch {}
+  }, [connectRemote]);
 
   const getState = useCallback((): SimState => sim.state, [sim]);
 
@@ -299,8 +296,41 @@ export default function Broadcast() {
                 Every move is a live API decision — plans, policies and latency
                 stream into the panels around the stage.
               </p>
+              <div className="start-overlay__byok">
+                <div className="start-overlay__byokrow">
+                  <input
+                    className="start-overlay__key hud-mono"
+                    type="password"
+                    placeholder="vck_… your Vercel AI Gateway key"
+                    value={keyInput}
+                    autoComplete="off"
+                    onChange={(e) => setKeyInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && void connectRemote(keyInput)}
+                  />
+                  <button
+                    className="start-overlay__connect"
+                    disabled={keyStatus === 'checking' || !keyInput.trim()}
+                    onClick={() => void connectRemote(keyInput)}
+                  >
+                    {keyStatus === 'checking' ? 'Checking…' : 'Connect'}
+                  </button>
+                </div>
+                <div
+                  className={`start-overlay__keystatus hud-mono start-overlay__keystatus--${keyStatus}`}
+                >
+                  {keyStatus === 'valid' && balance != null
+                    ? `✓ key connected · $${balance.toFixed(2)} gateway credit · ~$0.00002 per decision`
+                    : keyStatus === 'valid'
+                      ? '✓ key connected — all four chefs go live on Jev'
+                      : keyStatus === 'invalid'
+                        ? '✗ key rejected by the gateway — check it and try again'
+                        : keyStatus === 'checking'
+                          ? 'validating key with the gateway…'
+                          : 'bring your own key (BYOK) — it stays in your browser, proxied per-request, never stored'}
+                </div>
+              </div>
               <button className="start-overlay__btn" onClick={startShift}>
-                Start Shift
+                {keyStatus === 'valid' ? 'Start Shift — Live Jev' : 'Start Shift — Emulated'}
               </button>
               <label className="start-overlay__rec">
                 <input
@@ -311,7 +341,8 @@ export default function Broadcast() {
                 <span className="start-overlay__recdot" /> Record shift video (.webm)
               </label>
               <div className="start-overlay__model hud-mono">
-                model: {brainName} · connect a live Jev key via the API button
+                model: {brainName} · no key? get one at vercel.com → AI Gateway, or run the
+                free emulated brain
               </div>
             </div>
           )}

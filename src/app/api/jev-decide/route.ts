@@ -1,12 +1,16 @@
 // ─────────────────────────────────────────────────────────────
-// Jev decision proxy. The browser POSTs the game's DecisionRequest
-// here; we reformulate it as a single TypeSafe Jev `choice` question
-// and evaluate it through Vercel AI Gateway (model typesafe-ai/jev).
-// The gateway key stays server-side: env AI_GATEWAY_API_KEY, or an
-// x-gateway-key header pasted via the in-app API button.
+// Jev decision proxy — BYOK (bring your own key).
+// The browser POSTs the game's DecisionRequest with the visitor's
+// own Vercel AI Gateway key in x-gateway-key; we reformulate it as
+// a single TypeSafe Jev `choice` question and evaluate it through
+// the gateway (model typesafe-ai/jev). The key is used per-request
+// only — never stored, never read from server env.
+// GET with x-gateway-key validates a key and returns its credit
+// balance; GET without a key describes the endpoint.
 // ─────────────────────────────────────────────────────────────
 import { NextRequest, NextResponse } from 'next/server';
 import { experimental_evaluate as evaluate } from 'ai';
+import { createGateway } from '@ai-sdk/gateway';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -21,11 +25,28 @@ interface GameOption {
   label: string;
 }
 
-export async function GET() {
-  return NextResponse.json({
-    configured: Boolean(process.env.AI_GATEWAY_API_KEY),
-    model: MODEL,
-  });
+function readKey(req: NextRequest): string | null {
+  const k = req.headers.get('x-gateway-key') ?? req.headers.get('x-api-key');
+  return k && k.trim().length > 0 ? k.trim() : null;
+}
+
+export async function GET(req: NextRequest) {
+  const key = readKey(req);
+  if (!key) {
+    return NextResponse.json({ byok: true, configured: false, model: MODEL });
+  }
+  try {
+    const gw = createGateway({ apiKey: key });
+    const credits = (await gw.getCredits()) as { balance?: unknown; total_used?: unknown };
+    return NextResponse.json({
+      valid: true,
+      model: MODEL,
+      balance: Number(credits.balance ?? 0),
+      totalUsed: Number(credits.total_used ?? 0),
+    });
+  } catch {
+    return NextResponse.json({ valid: false, model: MODEL }, { status: 401 });
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -50,15 +71,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'no options' }, { status: 422 });
   }
 
-  const headerKey = req.headers.get('x-gateway-key') ?? req.headers.get('x-api-key');
-  if (headerKey && !process.env.AI_GATEWAY_API_KEY) {
-    // Single-tenant showcase: adopt the pasted key for this runtime so the
-    // AI SDK's gateway provider picks it up.
-    process.env.AI_GATEWAY_API_KEY = headerKey;
-  }
-  if (!process.env.AI_GATEWAY_API_KEY) {
+  const key = readKey(req);
+  if (!key) {
     return NextResponse.json(
-      { error: 'AI_GATEWAY_API_KEY not configured' },
+      { error: 'byok: send your Vercel AI Gateway key in x-gateway-key' },
       { status: 401 },
     );
   }
@@ -72,9 +88,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    const gw = createGateway({ apiKey: key });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result: any = await evaluate({
-      model: MODEL,
+      model: gw.evaluationModel(MODEL),
       state: JSON.parse(
         JSON.stringify({
           role: `You are chef ${body.chefId ?? 0} (one of four AI chefs) in an Overcooked-style kitchen. Maximize dishes served before their order deadlines; never let cooked food burn; fires are emergencies.`,

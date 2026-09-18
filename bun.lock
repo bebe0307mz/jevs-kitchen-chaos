@@ -5,6 +5,7 @@
     "": {
       "name": "jevs-kitchen-chaos",
       "dependencies": {
+        "@ai-sdk/gateway": "^4.0.86",
         "@react-three/drei": "^9",
         "@react-three/fiber": "^8",
         "ai": "^7.0.106",

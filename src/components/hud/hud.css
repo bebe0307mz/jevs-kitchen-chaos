@@ -868,3 +868,33 @@
   width: 7px; height: 7px; border-radius: 50%; background: var(--p1);
   animation: lowtime 1.2s steps(2) infinite;
 }
+
+/* BYOK key entry on the start overlay */
+.start-overlay__byok { display: flex; flex-direction: column; gap: 7px; align-items: center; }
+.start-overlay__byokrow { display: flex; gap: 8px; }
+.start-overlay__key {
+  width: 320px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  outline: none;
+  letter-spacing: 0.04em;
+}
+.start-overlay__key:focus { border-color: var(--p3); }
+.start-overlay__key::placeholder { color: var(--dim); }
+.start-overlay__connect {
+  padding: 10px 16px;
+  font-family: var(--font-display), 'Archivo', sans-serif;
+  font-size: 11px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--text); background: transparent;
+  border: 1px solid var(--panel-edge); border-radius: 6px; cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.start-overlay__connect:hover:not(:disabled) { border-color: var(--p3); color: var(--p3); }
+.start-overlay__connect:disabled { opacity: 0.45; cursor: default; }
+.start-overlay__keystatus { font-size: 10px; letter-spacing: 0.05em; color: var(--dim); min-height: 1.2em; }
+.start-overlay__keystatus--valid { color: var(--good); }
+.start-overlay__keystatus--invalid { color: var(--p1); }
