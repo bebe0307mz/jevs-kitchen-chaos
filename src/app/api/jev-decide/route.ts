@@ -127,13 +127,17 @@ export async function POST(req: NextRequest) {
           ? result.usage.input_tokens
           : 400;
 
+    // The gateway reports exact spend per call; prefer it over estimation.
+    const gatewayCost = parseFloat(result?.providerMetadata?.gateway?.cost ?? '');
+    const costUsd = Number.isFinite(gatewayCost) ? gatewayCost : tokens * PRICE_PER_TOKEN;
+
     return NextResponse.json({
       chosenId,
       policy,
       confidence,
       latencyMs: Date.now() - t0,
       tokens,
-      costUsd: tokens * PRICE_PER_TOKEN,
+      costUsd,
       model: MODEL,
     });
   } catch (err) {
