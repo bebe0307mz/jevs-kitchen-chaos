@@ -109,6 +109,7 @@ export interface Chef {
   action: ChefAction;
   actionProgress: number;  // 0..1 while working
   path: Point[];           // remaining waypoints (tile centers)
+  dishesServed: number;    // lifetime dishes this chef delivered
   planLabel: string;       // human plan e.g. "Soup: chop tomato"
   moveLabel: string;       // micro move e.g. "Chop", "Walk → Stove 2"
   targetStationId: number | null;

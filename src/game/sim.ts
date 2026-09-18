@@ -126,6 +126,7 @@ export class KitchenSim {
         x: spawn.x, y: spawn.y,
         facing: { x: 0, y: 1 },
         carrying: null,
+        dishesServed: 0,
         action: 'idle',
         actionProgress: 0,
         path: [],
@@ -888,6 +889,7 @@ export class KitchenSim {
       const pts = RECIPES[order.dish].points;
       this.state.score += pts;
       this.state.served++;
+      c.dishesServed++;
       this.pushEvent('serve', `${c.name} served ${RECIPES[order.dish].name} (+${pts})`);
       // celebrate
       r.steps = [{

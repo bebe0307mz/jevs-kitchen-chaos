@@ -38,15 +38,23 @@ export default function Broadcast() {
 
   const [snap, setSnap] = useState<SimState>(() => snapshotState(sim.state));
   const [brainName, setBrainName] = useState('jev-local (emulated)');
+  const [started, setStarted] = useState(false);
+  const startedRef = useRef(false);
 
-  // Fixed-step sim loop driven by rAF.
+  const startShift = useCallback(() => {
+    startedRef.current = true;
+    setStarted(true);
+  }, []);
+
+  // Fixed-step sim loop driven by rAF. The kitchen holds (attract mode)
+  // until the shift is started.
   useEffect(() => {
     let raf = 0;
     let last = performance.now();
     const loop = (now: number) => {
       const dt = Math.min((now - last) / 1000, 0.1);
       last = now;
-      sim.tick(dt);
+      if (startedRef.current) sim.tick(dt);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -112,6 +120,26 @@ export default function Broadcast() {
           >
             <KitchenScene getState={getState} />
           </Canvas>
+          {!started && (
+            <div className="start-overlay">
+              <div className="start-overlay__label">Live AI Showcase</div>
+              <h1 className="start-overlay__title">
+                Jev&apos;s Kitchen Chaos
+              </h1>
+              <p className="start-overlay__sub">
+                Four Jev decision agents run this kitchen.
+                <br />
+                Every move is a live API decision — plans, policies and latency
+                stream into the panels around the stage.
+              </p>
+              <button className="start-overlay__btn" onClick={startShift}>
+                Start Shift
+              </button>
+              <div className="start-overlay__model hud-mono">
+                model: {brainName} · connect a live Jev key via the API button
+              </div>
+            </div>
+          )}
         </div>
         <BottomBar
           state={snap}

@@ -109,6 +109,7 @@ export function makeMockState(): SimState {
     // P1 — chopping at board 0
     {
       id: 0, name: defs[0].name, accent: defs[0].accent,
+      dishesServed: 0,
       x: board0 ? board0.x : 4, y: board0 ? board0.y + 1 : 4,
       facing: { x: 0, y: -1 },
       carrying: null,
@@ -120,6 +121,7 @@ export function makeMockState(): SimState {
     // P2 — walking, carrying a chopped tomato toward a stove
     {
       id: 1, name: defs[1].name, accent: defs[1].accent,
+      dishesServed: 0,
       x: 6.4, y: 2.2,
       facing: { x: 0.6, y: -0.8 },
       carrying: { ingredient: 'tomato', stage: 'chopped' },
@@ -131,6 +133,7 @@ export function makeMockState(): SimState {
     // P3 — celebrating a delivery, carrying a plated dish
     {
       id: 2, name: defs[2].name, accent: defs[2].accent,
+      dishesServed: 0,
       x: 8.5, y: 1.6,
       facing: { x: 0, y: -1 },
       carrying: { ingredient: 'meat', stage: 'plated', dish: 'burger' },
@@ -142,6 +145,7 @@ export function makeMockState(): SimState {
     // P4 — panicking next to the fire
     {
       id: 3, name: defs[3].name, accent: defs[3].accent,
+      dishesServed: 0,
       x: stove2 ? stove2.x : 12, y: stove2 ? stove2.y + 1.3 : 1.3,
       facing: { x: 0, y: -1 },
       carrying: null,

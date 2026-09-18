@@ -145,7 +145,7 @@ function TelemetryPanelBase({ chef, telemetry, side }: { chef: Chef; telemetry: 
           {chef.name.toUpperCase()} <span className="tpanel__role">· {ROLE_TAGS[chef.id] ?? 'CHEF'}</span>
         </div>
         <div className="tpanel__count hud-mono">
-          <b>{telemetry.decisions.toLocaleString()}</b> RESPONSES
+          <b>{telemetry.decisions.toLocaleString()}</b> RESP · <b>{chef.dishesServed}</b> SERVED
         </div>
       </div>
 

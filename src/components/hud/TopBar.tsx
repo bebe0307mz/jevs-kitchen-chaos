@@ -52,6 +52,10 @@ function TopBarBase({ state }: { state: SimState }) {
           <span className="statblock__val statblock__val--good hud-mono">{formatCost(cost)}</span>
         </div>
         <div className="statblock">
+          <span className="hud-microlabel">Score</span>
+          <span className="statblock__val statblock__val--score hud-mono">{state.score.toLocaleString()}</span>
+        </div>
+        <div className="statblock">
           <span className="hud-microlabel">Orders</span>
           <span className="statblock__val hud-mono">{state.served}<span>/{totalOrders}</span></span>
         </div>
