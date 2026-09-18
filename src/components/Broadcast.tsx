@@ -291,17 +291,19 @@ export default function Broadcast() {
                 Jev&apos;s Kitchen Chaos
               </h1>
               <p className="start-overlay__sub">
-                Four Jev decision agents run this kitchen.
+                Jev is TypeSafe&apos;s decision model: game state in, a chosen move out —
+                no text, just probabilities.
                 <br />
-                Every move is a live API decision — plans, policies and latency
-                stream into the panels around the stage.
+                Here it plays all four chefs at once. Each panel shows that chef&apos;s
+                current plan, Jev&apos;s confidence, and the real API latency.
               </p>
               <div className="start-overlay__byok">
+                <div className="hud-microlabel">Play with the real Jev — use your own key</div>
                 <div className="start-overlay__byokrow">
                   <input
                     className="start-overlay__key hud-mono"
                     type="password"
-                    placeholder="vck_… your Vercel AI Gateway key"
+                    placeholder="Paste your Vercel AI Gateway key (vck_…)"
                     value={keyInput}
                     autoComplete="off"
                     onChange={(e) => setKeyInput(e.target.value)}
@@ -319,18 +321,18 @@ export default function Broadcast() {
                   className={`start-overlay__keystatus hud-mono start-overlay__keystatus--${keyStatus}`}
                 >
                   {keyStatus === 'valid' && balance != null
-                    ? `✓ key connected · $${balance.toFixed(2)} gateway credit · ~$0.00002 per decision`
+                    ? `✓ Connected — $${balance.toFixed(2)} gateway credit. A full game costs about $0.01.`
                     : keyStatus === 'valid'
-                      ? '✓ key connected — all four chefs go live on Jev'
+                      ? '✓ Connected — every decision now comes from the real Jev API.'
                       : keyStatus === 'invalid'
-                        ? '✗ key rejected by the gateway — check it and try again'
+                        ? '✗ The gateway rejected this key. It should start with vck_ — check and retry.'
                         : keyStatus === 'checking'
-                          ? 'validating key with the gateway…'
-                          : 'bring your own key (BYOK) — it stays in your browser, proxied per-request, never stored'}
+                          ? 'Checking your key with the gateway…'
+                          : 'Costs run on your gateway credits (~$0.01 per game). The key stays in this browser — our server never stores it.'}
                 </div>
               </div>
               <button className="start-overlay__btn" onClick={startShift}>
-                {keyStatus === 'valid' ? 'Start Shift — Live Jev' : 'Start Shift — Emulated'}
+                {keyStatus === 'valid' ? 'Start Shift · Live Jev' : 'Start Demo Shift'}
               </button>
               <label className="start-overlay__rec">
                 <input
@@ -338,11 +340,12 @@ export default function Broadcast() {
                   checked={recordArmed}
                   onChange={(e) => setRecordArmed(e.target.checked)}
                 />
-                <span className="start-overlay__recdot" /> Record shift video (.webm)
+                <span className="start-overlay__recdot" /> Record a video of the shift (.webm)
               </label>
               <div className="start-overlay__model hud-mono">
-                model: {brainName} · no key? get one at vercel.com → AI Gateway, or run the
-                free emulated brain
+                {keyStatus === 'valid'
+                  ? `model: ${brainName}`
+                  : 'No key? The demo runs a built-in imitation of Jev — free. Get a real key at vercel.com → AI Gateway.'}
               </div>
             </div>
           )}

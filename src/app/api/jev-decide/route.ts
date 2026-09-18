@@ -37,12 +37,16 @@ export async function GET(req: NextRequest) {
   }
   try {
     const gw = createGateway({ apiKey: key });
-    const credits = (await gw.getCredits()) as { balance?: unknown; total_used?: unknown };
+    const credits = (await gw.getCredits()) as {
+      balance?: unknown;
+      totalUsed?: unknown;
+      total_used?: unknown;
+    };
     return NextResponse.json({
       valid: true,
       model: MODEL,
       balance: Number(credits.balance ?? 0),
-      totalUsed: Number(credits.total_used ?? 0),
+      totalUsed: Number(credits.totalUsed ?? credits.total_used ?? 0),
     });
   } catch {
     return NextResponse.json({ valid: false, model: MODEL }, { status: 401 });
