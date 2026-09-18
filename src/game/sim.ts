@@ -157,7 +157,10 @@ export class KitchenSim {
         steps: [],
         stepTime: 0,
         bHoldUntil: 0,
-        lastDecisionAt: -999,
+        // Stagger the opening decisions (chef i waits i*0.35s) so four
+        // identical states don't hit a deterministic brain simultaneously
+        // and all claim the same order.
+        lastDecisionAt: i * 0.35 - DECISION_MIN_GAP,
         idleSince: 0,
         wobble: (i - 1.5) * 0.12,
         telemetry,
@@ -660,6 +663,16 @@ export class KitchenSim {
       pos: { x: Math.round(c.x * 10) / 10, y: Math.round(c.y * 10) / 10 },
       distances,
       stations: this.stationSummary(),
+      // What the other three chefs are doing, so a deterministic brain can
+      // differentiate identical-looking situations and avoid claim pileups.
+      teammates: this.rt
+        .filter((o) => o.chef.id !== c.id)
+        .map((o) => ({
+          chef: o.chef.id,
+          plan: o.chef.planLabel,
+          claimedOrderId: this.claimedOrder(o.chef.id)?.id ?? null,
+          deciding: o.telemetry.inFlight,
+        })),
     };
     return { chefId: c.id, gameTime: Math.round(now * 100) / 100, options, state };
   }
