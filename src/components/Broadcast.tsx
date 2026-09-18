@@ -193,16 +193,6 @@ export default function Broadcast() {
 
   const shiftOver = started && !snap.running && snap.t >= snap.shiftEndsAt;
 
-  // Expose the full log for analysis + download once the shift ends, and
-  // finalize the shift recording (auto-downloads the .webm).
-  useEffect(() => {
-    if (!shiftOver) return;
-    try {
-      (window as unknown as Record<string, unknown>).__jevShiftLog = sim.getShiftLog();
-    } catch {}
-    stopRecording();
-  }, [shiftOver, sim, stopRecording]);
-
   const downloadLog = useCallback(() => {
     const log = sim.getShiftLog();
     const blob = new Blob([JSON.stringify(log, null, 1)], { type: 'application/json' });
@@ -212,6 +202,21 @@ export default function Broadcast() {
     a.click();
     URL.revokeObjectURL(a.href);
   }, [sim]);
+
+
+  // Expose the full log for analysis + download once the shift ends, and
+  // finalize the shift recording (auto-downloads the .webm).
+  useEffect(() => {
+    if (!shiftOver) return;
+    try {
+      (window as unknown as Record<string, unknown>).__jevShiftLog = sim.getShiftLog();
+      // ?autolog=1 → save the analysis log with no interaction needed
+      if (new URLSearchParams(window.location.search).get('autolog') === '1') {
+        downloadLog();
+      }
+    } catch {}
+    stopRecording();
+  }, [shiftOver, sim, stopRecording, downloadLog]);
 
   return (
     <div className="broadcast">
