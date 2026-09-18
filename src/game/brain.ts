@@ -149,6 +149,13 @@ export class LocalJevBrain implements JevBrain {
   }
 }
 
+// Shared circuit breaker across all four chefs' RemoteJevBrain instances:
+// after 3 consecutive gateway failures (e.g. free-tier rate limiting) we stop
+// paying the failed round trip and run local for a cooldown, then probe again.
+const breaker = { failures: 0, openUntil: 0 };
+const BREAKER_THRESHOLD = 3;
+const BREAKER_COOLDOWN_MS = 20_000;
+
 export class RemoteJevBrain implements JevBrain {
   readonly name = 'typesafe-ai/jev';
   private fallback = new LocalJevBrain();
@@ -156,6 +163,7 @@ export class RemoteJevBrain implements JevBrain {
   constructor(private endpoint: string, private apiKey: string) {}
 
   async decide(req: DecisionRequest): Promise<JevDecision> {
+    if (Date.now() < breaker.openUntil) return this.fallback.decide(req);
     const start = Date.now();
     try {
       const res = await fetch(this.endpoint, {
@@ -174,15 +182,25 @@ export class RemoteJevBrain implements JevBrain {
         }),
       });
       const latencyMs = Date.now() - start;
-      if (!res.ok) return this.fallback.decide(req);
+      if (!res.ok) return this.failover(req);
 
       const data: unknown = await res.json();
       const decision = this.parse(req, data, latencyMs);
-      if (decision) return decision;
-      return this.fallback.decide(req);
+      if (!decision) return this.failover(req);
+      breaker.failures = 0;
+      return decision;
     } catch {
-      return this.fallback.decide(req);
+      return this.failover(req);
     }
+  }
+
+  private failover(req: DecisionRequest): Promise<JevDecision> {
+    breaker.failures++;
+    if (breaker.failures >= BREAKER_THRESHOLD) {
+      breaker.openUntil = Date.now() + BREAKER_COOLDOWN_MS;
+      breaker.failures = 0;
+    }
+    return this.fallback.decide(req);
   }
 
   private parse(

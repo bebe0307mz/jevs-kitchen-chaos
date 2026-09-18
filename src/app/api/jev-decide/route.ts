@@ -95,6 +95,9 @@ export async function POST(req: NextRequest) {
     const gw = createGateway({ apiKey: key });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result: any = await evaluate({
+      // Fail fast: the game has a local fallback brain, so a rate-limited
+      // call must return quickly instead of stalling the chef ~7s in retries.
+      maxRetries: 0,
       model: gw.evaluationModel(MODEL),
       state: JSON.parse(
         JSON.stringify({
