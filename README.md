@@ -1,28 +1,42 @@
-# Jev's Kitchen Chaos
+# Jev's Kitchen Chaos — Four Live Jev Chefs
 
-A living Overcooked-style kitchen where autonomous Jev agents cook, collide, panic, and burn things. You can hire, fire, sabotage, or save them in real time.
+An Overcooked-style 3D kitchen run entirely by four Jev decision-model agents,
+presented as a live esports broadcast: the game in the center, per-chef
+telemetry panels around it (current plan, policy confidence, response latency,
+live controller inputs), and an aggregate latency/decisions/cost strip on top.
 
-## Features
+## How it works
 
-- **5 autonomous Jev agents** navigate a top-down kitchen grid, picking up ingredients, cooking dishes, plating, and delivering. Emergent traffic jams and near-misses happen without you touching anything.
-- **Click any Jev to possess it**: take manual control, ruin a dish mid-cook, or sacrifice yourself to save a burning station.
-- **Hire a new Jev** (spawns panicked), **fire one** (it rage-quits and knocks things over), or trigger **Rush Hour** (3x orders flood in).
-- **Kitchen degrades in real time**: grease builds, stations catch fire, agents slip on spills, and they adapt their pathfinding around the chaos.
-- **End-of-shift scoreboard**: dishes served, fires caused, Jevs fired. Share your score on X.
+- **KitchenSim** (`src/game/sim.ts`) — headless tick-based simulation: orders,
+  stations, A* movement, cooking/chopping/plating, fires. Chefs never plan for
+  themselves.
+- **Jev decision loop** (`src/game/brain.ts`) — whenever a chef runs out of
+  steps, the sim sends a compact game state + enumerated action options to its
+  brain and gets back a decision: chosen action, policy distribution,
+  confidence, latency, token cost. `LocalJevBrain` emulates the API shape with
+  a utility+softmax policy; `RemoteJevBrain` POSTs to a live Jev API endpoint
+  (`x-api-key` header) and falls back locally on any error.
+- **3D scene** (`src/components/three/`) — react-three-fiber Overcooked-style
+  diorama: procedural low-poly kitchen, cute chef blobs, fire/steam/confetti
+  particles.
+- **Broadcast HUD** (`src/components/hud/`) — the Smash-showcase-style
+  telemetry chrome.
 
-## Stack
+## Live Jev API
 
-- Next.js 14 (static export)
-- HTML5 Canvas rendering
-- Custom A* pathfinding
-- Finite state machines for agent AI
-- Zero backend
+Click **API** (bottom right) and paste a key to hot-swap all four chefs from
+the local emulated brain to the live Jev API. Endpoint comes from
+`NEXT_PUBLIC_JEV_API_URL`, or paste `https://endpoint|key` to override.
+Expected protocol: POST `{chefId, gameTime, options[], state}` → `{chosenId,
+policy[], confidence, tokens, cost_usd}`.
 
-## Getting Started
+## Dev
 
 ```bash
 bun install
-bun run dev
+bun run dev        # play locally
+bun scripts/simtest.ts   # headless 240s sim harness (assertions on serve rate, deadlocks, fires)
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Buttons: **RUSH HOUR** floods orders for 30s · **START FIRE** ignites a busy
+stove · click nothing and the four Jevs just run the kitchen forever.
