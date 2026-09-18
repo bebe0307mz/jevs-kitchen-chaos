@@ -48,11 +48,74 @@ export default function Broadcast() {
   const [brainName, setBrainName] = useState('jev-local (emulated)');
   const [started, setStarted] = useState(false);
   const startedRef = useRef(false);
+  const [recordArmed, setRecordArmed] = useState(true);
+  const [recording, setRecording] = useState(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recStreamRef = useRef<MediaStream | null>(null);
+
+  const stopRecording = useCallback(() => {
+    const rec = recorderRef.current;
+    if (rec && rec.state !== 'inactive') rec.stop();
+    recStreamRef.current?.getTracks().forEach((t) => t.stop());
+    recorderRef.current = null;
+    recStreamRef.current = null;
+    setRecording(false);
+  }, []);
+
+  // Record the shift: prefer full-tab capture (game + telemetry panels, one
+  // browser share prompt); fall back to the 3D canvas stream (no prompts).
+  const startRecording = useCallback(async () => {
+    let stream: MediaStream | null = null;
+    const forceCanvas =
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('rec') === 'canvas';
+    if (!forceCanvas && navigator.mediaDevices?.getDisplayMedia) {
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          // @ts-expect-error chrome-only hints
+          preferCurrentTab: true,
+          video: { frameRate: 30 },
+          audio: false,
+        });
+      } catch {
+        stream = null; // denied → canvas fallback
+      }
+    }
+    if (!stream) {
+      const canvas = document.querySelector('.stage canvas') as HTMLCanvasElement | null;
+      if (!canvas || typeof canvas.captureStream !== 'function') return;
+      stream = canvas.captureStream(30);
+    }
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(
+      (m) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m),
+    );
+    if (!mime) return;
+    const chunks: Blob[] = [];
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
+    rec.ondataavailable = (e) => e.data.size > 0 && chunks.push(e.data);
+    rec.onstop = () => {
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      if (blob.size > 0) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `jev-shift-recording-${Date.now()}.webm`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+    };
+    // stop if the user ends tab sharing manually
+    stream.getVideoTracks()[0]?.addEventListener('ended', () => stopRecording());
+    rec.start(1000);
+    recorderRef.current = rec;
+    recStreamRef.current = stream;
+    setRecording(true);
+  }, [stopRecording]);
 
   const startShift = useCallback(() => {
     startedRef.current = true;
     setStarted(true);
-  }, []);
+    if (recordArmed) void startRecording();
+  }, [recordArmed, startRecording]);
 
   // Fixed-step sim loop driven by rAF. The kitchen holds (attract mode)
   // until the shift is started.
@@ -130,13 +193,15 @@ export default function Broadcast() {
 
   const shiftOver = started && !snap.running && snap.t >= snap.shiftEndsAt;
 
-  // Expose the full log for analysis + download once the shift ends.
+  // Expose the full log for analysis + download once the shift ends, and
+  // finalize the shift recording (auto-downloads the .webm).
   useEffect(() => {
     if (!shiftOver) return;
     try {
       (window as unknown as Record<string, unknown>).__jevShiftLog = sim.getShiftLog();
     } catch {}
-  }, [shiftOver, sim]);
+    stopRecording();
+  }, [shiftOver, sim, stopRecording]);
 
   const downloadLog = useCallback(() => {
     const log = sim.getShiftLog();
@@ -166,6 +231,11 @@ export default function Broadcast() {
           >
             <KitchenScene getState={getState} />
           </Canvas>
+          {recording && !shiftOver && (
+            <div className="rec-chip">
+              <span className="rec-chip__dot" /> REC
+            </div>
+          )}
           {shiftOver && (
             <div className="end-overlay">
               <div className="end-overlay__label">Shift Over</div>
@@ -227,6 +297,14 @@ export default function Broadcast() {
               <button className="start-overlay__btn" onClick={startShift}>
                 Start Shift
               </button>
+              <label className="start-overlay__rec">
+                <input
+                  type="checkbox"
+                  checked={recordArmed}
+                  onChange={(e) => setRecordArmed(e.target.checked)}
+                />
+                <span className="start-overlay__recdot" /> Record shift video (.webm)
+              </label>
               <div className="start-overlay__model hud-mono">
                 model: {brainName} · connect a live Jev key via the API button
               </div>

@@ -845,3 +845,26 @@
   color: var(--text); background: transparent; border: 1px solid var(--panel-edge);
 }
 .end-overlay__btn--ghost:hover { border-color: var(--dim); transform: translateY(-1px); }
+
+/* recording toggle + live REC chip */
+.start-overlay__rec {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--font-mono), 'IBM Plex Mono', monospace;
+  font-size: 11px; color: var(--dim); cursor: pointer; user-select: none;
+}
+.start-overlay__rec input { accent-color: var(--p1); cursor: pointer; }
+.start-overlay__recdot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--p1); display: inline-block;
+}
+.rec-chip {
+  position: absolute; top: 10px; right: 12px; z-index: 4;
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 9px; border-radius: 4px;
+  background: rgba(10, 10, 15, 0.72); border: 1px solid var(--panel-edge);
+  font-family: var(--font-display), 'Archivo', sans-serif;
+  font-size: 10px; font-weight: 800; letter-spacing: 0.2em; color: var(--p1);
+}
+.rec-chip__dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--p1);
+  animation: lowtime 1.2s steps(2) infinite;
+}
