@@ -152,8 +152,11 @@ function Stove({ x, z, stationId, getState }: { x: number; z: number; stationId:
     if (!st) return;
     const time = clock.elapsedTime;
 
-    // progress bar: visible only while cooking (has item + progress in-flight)
-    const showRing = !!st.item && st.progress > 0 && st.progress < 1 && !st.onFire;
+    // progress bar: visible only while actively cooking. Once cooked,
+    // st.progress is reused by the sim as the burn timer — never draw it.
+    const showRing =
+      !!st.item && st.item.stage !== 'cooked' && st.item.stage !== 'burnt' &&
+      st.progress > 0 && st.progress < 1 && !st.onFire;
     if (ringGroupRef.current) ringGroupRef.current.visible = showRing;
     if (ringRef.current && showRing) {
       const p = st.progress;
