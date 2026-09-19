@@ -67,6 +67,17 @@ export default function Broadcast() {
   const [brainModel, setBrainModel] = useState('jev');
   const providerRef = useRef<string>('gateway');
   const keyRef = useRef<string>('');
+  // ?pure=1 → benchmark mode: no fallback brain, no breaker; failed calls
+  // just idle the chef until the next attempt.
+  const pureRef = useRef<boolean>(
+    (() => {
+      try {
+        return new URLSearchParams(window.location.search).get('pure') === '1';
+      } catch {
+        return false;
+      }
+    })(),
+  );
   const [started, setStarted] = useState(false);
   const startedRef = useRef(false);
   const [recordArmed, setRecordArmed] = useState(true);
@@ -217,7 +228,12 @@ export default function Broadcast() {
         keyRef.current = trimmed;
         providerRef.current = health.provider ?? 'gateway';
         sim.setBrains(
-          makeBrainFactory({ endpoint: DEFAULT_ENDPOINT, apiKey: trimmed, brainModel }),
+          makeBrainFactory({
+            endpoint: DEFAULT_ENDPOINT,
+            apiKey: trimmed,
+            brainModel,
+            pure: pureRef.current,
+          }),
         );
         setBrainName(
           brainModel !== 'jev'
@@ -242,7 +258,12 @@ export default function Broadcast() {
       setBrainModel(id);
       if (keyRef.current) {
         sim.setBrains(
-          makeBrainFactory({ endpoint: DEFAULT_ENDPOINT, apiKey: keyRef.current, brainModel: id }),
+          makeBrainFactory({
+            endpoint: DEFAULT_ENDPOINT,
+            apiKey: keyRef.current,
+            brainModel: id,
+            pure: pureRef.current,
+          }),
         );
         setBrainName(
           id !== 'jev'
@@ -478,7 +499,7 @@ export default function Broadcast() {
               </label>
               <div className="start-overlay__model hud-mono">
                 {keyStatus === 'valid'
-                  ? `model: ${brainName}`
+                  ? `model: ${brainName}${pureRef.current ? ' · PURE BENCHMARK (no fallback)' : ''}`
                   : 'No key? The demo runs a built-in imitation of Jev — free. Get a key at vercel.com → AI Gateway or openrouter.ai → Keys.'}
               </div>
             </div>

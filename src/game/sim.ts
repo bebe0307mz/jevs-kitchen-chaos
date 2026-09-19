@@ -953,8 +953,22 @@ export class KitchenSim {
     const c = r.chef;
     c.carrying = null;
     if (o.status !== 'open') {
-      // order died mid-delivery; nothing to bank
+      // Wrong serve: the order died before the dish reached the pass.
+      // Wasted food costs half the dish's points.
+      const penalty = Math.floor(RECIPES[o.dish].points / 2);
+      this.state.score -= penalty;
       c.workingOrderId = null;
+      this.pushEvent('fail', `${c.name} served ${RECIPES[o.dish].name} nobody wanted (−${penalty})`);
+      r.steps = [{
+        kind: 'work',
+        stationId: this.station(T.SERVE)!.id,
+        action: 'panicking',
+        duration: 1.0,
+        label: 'Oops…',
+        onDone: () => {},
+      }];
+      r.stepTime = 0;
+      c.planLabel = 'Wrong serve!';
       return;
     }
     o.status = 'done';

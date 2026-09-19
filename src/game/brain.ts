@@ -180,6 +180,9 @@ export class RemoteJevBrain implements JevBrain {
     private endpoint: string,
     private apiKey: string,
     private brainModel: string = 'jev',
+    // pure mode: NO fallback and NO breaker — a failed call throws, the chef
+    // idles and retries. Every logged decision is genuinely the model's.
+    private pure: boolean = false,
   ) {
     this.name = brainModel === 'jev' ? 'typesafe-ai/jev' : brainModel;
   }
@@ -192,7 +195,7 @@ export class RemoteJevBrain implements JevBrain {
   }
 
   async decide(req: DecisionRequest): Promise<JevDecision> {
-    if (Date.now() < breaker.openUntil) return this.fallback.decide(req);
+    if (!this.pure && Date.now() < breaker.openUntil) return this.fallback.decide(req);
     const start = Date.now();
     try {
       const res = await fetch(this.endpoint, {
@@ -212,19 +215,24 @@ export class RemoteJevBrain implements JevBrain {
         }),
       });
       const latencyMs = Date.now() - start;
-      if (!res.ok) return this.failover(req);
+      if (!res.ok) return this.failover(req, `http ${res.status}`);
 
       const data: unknown = await res.json();
       const decision = this.parse(req, data, latencyMs);
-      if (!decision) return this.failover(req);
+      if (!decision) return this.failover(req, 'unparseable decision');
       breaker.failures = 0;
       return Object.assign(decision, { source: 'live' });
-    } catch {
-      return this.failover(req);
+    } catch (err) {
+      return this.failover(req, err instanceof Error ? err.message : 'fetch failed');
     }
   }
 
-  private failover(req: DecisionRequest): Promise<JevDecision> {
+  private failover(req: DecisionRequest, reason: string): Promise<JevDecision> {
+    if (this.pure) {
+      // No substitute in pure mode — reject; the sim idles the chef briefly
+      // and re-requests, so the model pays its own penalty in the score.
+      return Promise.reject(new Error(reason));
+    }
     breaker.failures++;
     if (breaker.failures >= this.breakerThreshold) {
       breaker.openUntil = Date.now() + this.breakerCooldownMs;
@@ -291,11 +299,12 @@ export class RemoteJevBrain implements JevBrain {
 }
 
 export function makeBrainFactory(
-  cfg: { endpoint?: string; apiKey?: string; brainModel?: string } | null,
+  cfg: { endpoint?: string; apiKey?: string; brainModel?: string; pure?: boolean } | null,
 ): (chefId: number) => JevBrain {
   if (cfg && cfg.endpoint) {
-    const { endpoint, apiKey, brainModel } = cfg;
-    return () => new RemoteJevBrain(endpoint, apiKey ?? '', brainModel ?? 'jev');
+    const { endpoint, apiKey, brainModel, pure } = cfg;
+    return () =>
+      new RemoteJevBrain(endpoint, apiKey ?? '', brainModel ?? 'jev', pure ?? false);
   }
   return () => new LocalJevBrain();
 }

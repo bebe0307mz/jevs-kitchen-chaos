@@ -11,6 +11,7 @@ const ENDPOINT = 'https://jevs-kitchen-chaos.vercel.app/api/jev-decide';
 const KEY = process.env.JEV_KEY ?? '';
 
 const BRAIN_MODEL = process.env.BRAIN_MODEL ?? 'jev';
+const PURE = process.env.PURE === '1';
 
 class TaggedRemoteBrain implements JevBrain {
   readonly name = BRAIN_MODEL === 'jev' ? 'typesafe-ai/jev' : BRAIN_MODEL;
@@ -28,6 +29,7 @@ class TaggedRemoteBrain implements JevBrain {
       if (!req.options.some((o) => o.id === d.chosenId)) throw new Error('invalid choice');
       return Object.assign({}, d, { latencyMs: Date.now() - t0, source: 'live' });
     } catch (e) {
+      if (PURE) throw e;
       const d = await this.fallback.decide(req);
       return Object.assign({}, d, {
         source: 'fallback',
