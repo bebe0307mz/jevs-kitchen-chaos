@@ -686,13 +686,20 @@ export class KitchenSim {
       }
     }
 
-    // assemble: all components ready and nobody assembling yet.
+    // assemble: offered once ANY component is ready. Serving before all
+    // components are ready is allowed — and penalized at the pass. That's a
+    // deliberate judgment trap: rushing an incomplete dish costs points.
     for (const o of this.state.orders) {
       if (o.status !== 'open') continue;
       if (o.assemblerId !== null) continue;
-      if (o.components.every((comp) => comp.status === 'ready')) {
-        opts.push({ id: `assemble:${o.id}`, label: `Serve ${RECIPES[o.dish].name} #${o.id}` });
-      }
+      const ready = o.components.filter((comp) => comp.status === 'ready').length;
+      if (ready === 0) continue;
+      const total = o.components.length;
+      const label =
+        ready === total
+          ? `Serve ${RECIPES[o.dish].name} #${o.id}`
+          : `Serve ${RECIPES[o.dish].name} #${o.id} INCOMPLETE (${ready}/${total} — penalty!)`;
+      opts.push({ id: `assemble:${o.id}`, label });
     }
 
     // prep: every 'todo' component of every open order is up for grabs.
@@ -924,7 +931,7 @@ export class KitchenSim {
     const oid = Number(id.slice('assemble:'.length));
     const o = this.orderById(oid);
     if (!o || o.status !== 'open' || o.assemblerId !== null) return;
-    if (!o.components.every((comp) => comp.status === 'ready')) return;
+    if (!o.components.some((comp) => comp.status === 'ready')) return;
     const stationId = this.ensureAssemblyStation(o);
     const plates = this.state.stations.find((st) => st.id === stationId);
     if (!plates) return;
@@ -934,6 +941,16 @@ export class KitchenSim {
     this.walkThen(r, plates, {
       action: 'plating', duration: RECIPES[o.dish].assembleTime, label: `Assemble ${RECIPES[o.dish].name}`,
       onDone: (sim, rr) => {
+        // completeness is judged when the dish leaves the plate station —
+        // components that finished during the walk still count.
+        o.rushed = !o.components.every((comp) => comp.status === 'ready');
+        // parts still in prep no longer have a home; revert them so the work
+        // isn't silently lost (preppers will re-decide).
+        if (o.rushed) {
+          for (const comp of o.components) {
+            if (comp.status === 'prepping') { comp.status = 'todo'; comp.by = null; }
+          }
+        }
         rr.chef.carrying = { ingredient: firstIng, stage: 'plated', dish: o.dish };
         sim.pressB(rr);
         // clear the assembly entry — parts have been picked up onto the plate
@@ -969,6 +986,33 @@ export class KitchenSim {
       }];
       r.stepTime = 0;
       c.planLabel = 'Wrong serve!';
+      return;
+    }
+    if (o.rushed) {
+      // Wrong/incomplete dish reached the customer: no credit, half-points
+      // penalty, and the order is gone.
+      const missing = o.components.filter((comp) => comp.status !== 'ready').length;
+      const penalty = Math.floor(RECIPES[o.dish].points / 2);
+      this.state.score -= penalty;
+      this.state.failed++;
+      o.status = 'failed';
+      c.workingOrderId = null;
+      o.assemblerId = null;
+      o.assemblyStationId = null;
+      this.pushEvent(
+        'fail',
+        `${c.name} served an incomplete ${RECIPES[o.dish].name} — ${missing} part${missing === 1 ? '' : 's'} missing (−${penalty})`,
+      );
+      r.steps = [{
+        kind: 'work',
+        stationId: this.station(T.SERVE)!.id,
+        action: 'panicking',
+        duration: 1.0,
+        label: 'Sent it back!',
+        onDone: () => {},
+      }];
+      r.stepTime = 0;
+      c.planLabel = 'Incomplete serve!';
       return;
     }
     o.status = 'done';

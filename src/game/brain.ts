@@ -59,6 +59,9 @@ function scoreOption(opt: ActionOption, state: StateView): number {
   }
 
   if (id.startsWith('assemble:')) {
+    // Rushing an incomplete dish forfeits the order and costs points —
+    // near-never worth it for a sensible policy.
+    if (opt.label.includes('INCOMPLETE')) return 4;
     // Finishing a fully-prepped dish banks points — finishing beats starting.
     const oid = Number(id.slice('assemble:'.length));
     const order = state.orders?.find((o) => o.id === oid);

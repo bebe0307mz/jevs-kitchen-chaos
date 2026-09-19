@@ -136,6 +136,7 @@ export interface Order {
   components: OrderComponent[];      // parallel to RECIPES[dish].components
   assemblyStationId: number | null;  // PLATES station holding ready parts
   assemblerId: number | null;        // chef assembling/delivering, else null
+  rushed?: boolean;                  // assembled before all components ready
 }
 
 // Lightweight per-order view of parts sitting at an assembly station,
