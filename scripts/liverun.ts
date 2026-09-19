@@ -10,8 +10,10 @@ import type { JevBrain, DecisionRequest, JevDecision } from '../src/game/types';
 const ENDPOINT = 'https://jevs-kitchen-chaos.vercel.app/api/jev-decide';
 const KEY = process.env.JEV_KEY ?? '';
 
+const BRAIN_MODEL = process.env.BRAIN_MODEL ?? 'jev';
+
 class TaggedRemoteBrain implements JevBrain {
-  readonly name = 'typesafe-ai/jev';
+  readonly name = BRAIN_MODEL === 'jev' ? 'typesafe-ai/jev' : BRAIN_MODEL;
   private fallback = new LocalJevBrain();
   async decide(req: DecisionRequest): Promise<JevDecision> {
     const t0 = Date.now();
@@ -19,7 +21,7 @@ class TaggedRemoteBrain implements JevBrain {
       const res = await fetch(ENDPOINT, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-gateway-key': KEY },
-        body: JSON.stringify(req),
+        body: JSON.stringify({ ...req, brainModel: BRAIN_MODEL }),
       });
       if (!res.ok) throw new Error(`http ${res.status}`);
       const d = (await res.json()) as JevDecision;
@@ -53,7 +55,10 @@ const iv = setInterval(() => {
   if (!sim.state.running && sim.state.t >= sim.state.shiftEndsAt) {
     clearInterval(iv);
     const log = sim.getShiftLog();
-    writeFileSync(`/tmp/jev-game-${mode}.json`, JSON.stringify(log, null, 1));
+    const tag = mode === 'live' && BRAIN_MODEL !== 'jev'
+      ? `live-${BRAIN_MODEL.replace(/[^a-z0-9.]+/gi, '-')}`
+      : mode;
+    writeFileSync(`/tmp/jev-game-${tag}.json`, JSON.stringify(log, null, 1));
     console.log(
       `${mode} done: score=${log.score} served=${log.served} failed=${log.failed} fires=${log.fires} decisions=${log.decisions.length}`,
     );

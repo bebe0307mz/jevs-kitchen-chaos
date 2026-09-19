@@ -18,6 +18,14 @@ const LIVE_BRAIN_NAME = 'typesafe-ai/jev (live via AI Gateway)';
 const LIVE_BRAIN_NAME_OR = 'typesafe/jev-1.13 (live via OpenRouter)';
 const LOCAL_BRAIN_NAME = 'jev-local (emulated)';
 
+// Benchmark roster — same slugs on both providers.
+const BRAIN_MODELS = [
+  { id: 'jev', label: 'Jev (TypeSafe) · decisions API' },
+  { id: 'anthropic/claude-opus-4.8', label: 'Claude Opus 4.8' },
+  { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5 · fast' },
+  { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash · fast' },
+];
+
 type KeyStatus = 'none' | 'checking' | 'valid' | 'invalid';
 
 // HUD components memoize on object identity, so every 10Hz snapshot must
@@ -56,6 +64,9 @@ export default function Broadcast() {
   const [keyInput, setKeyInput] = useState('');
   const [keyTail, setKeyTail] = useState('');
   const [balance, setBalance] = useState<number | null>(null);
+  const [brainModel, setBrainModel] = useState('jev');
+  const providerRef = useRef<string>('gateway');
+  const keyRef = useRef<string>('');
   const [started, setStarted] = useState(false);
   const startedRef = useRef(false);
   const [recordArmed, setRecordArmed] = useState(true);
@@ -203,14 +214,43 @@ export default function Broadcast() {
         try {
           localStorage.setItem(KEY_STORAGE, trimmed);
         } catch {}
-        sim.setBrains(makeBrainFactory({ endpoint: DEFAULT_ENDPOINT, apiKey: trimmed }));
-        setBrainName(health.provider === 'openrouter' ? LIVE_BRAIN_NAME_OR : LIVE_BRAIN_NAME);
+        keyRef.current = trimmed;
+        providerRef.current = health.provider ?? 'gateway';
+        sim.setBrains(
+          makeBrainFactory({ endpoint: DEFAULT_ENDPOINT, apiKey: trimmed, brainModel }),
+        );
+        setBrainName(
+          brainModel !== 'jev'
+            ? `${brainModel} (live via ${health.provider === 'openrouter' ? 'OpenRouter' : 'AI Gateway'})`
+            : health.provider === 'openrouter'
+              ? LIVE_BRAIN_NAME_OR
+              : LIVE_BRAIN_NAME,
+        );
         setBalance(typeof health.balance === 'number' ? health.balance : null);
         setKeyTail(trimmed.slice(-4));
         setKeyInput('');
         setKeyStatus('valid');
       } catch {
         setKeyStatus('invalid');
+      }
+    },
+    [sim],
+  );
+
+  const selectBrainModel = useCallback(
+    (id: string) => {
+      setBrainModel(id);
+      if (keyRef.current) {
+        sim.setBrains(
+          makeBrainFactory({ endpoint: DEFAULT_ENDPOINT, apiKey: keyRef.current, brainModel: id }),
+        );
+        setBrainName(
+          id !== 'jev'
+            ? `${id} (live via ${providerRef.current === 'openrouter' ? 'OpenRouter' : 'AI Gateway'})`
+            : providerRef.current === 'openrouter'
+              ? LIVE_BRAIN_NAME_OR
+              : LIVE_BRAIN_NAME,
+        );
       }
     },
     [sim],
@@ -404,8 +444,28 @@ export default function Broadcast() {
                           : 'Works with Vercel AI Gateway or OpenRouter credits (~$0.01 per game). The key stays in this browser — our server never stores it.'}
                 </div>
               </div>
+              {keyStatus === 'valid' && (
+                <div className="start-overlay__brains">
+                  <div className="hud-microlabel">Chef brain — benchmark them</div>
+                  <div className="start-overlay__brainrow">
+                    {BRAIN_MODELS.map((m) => (
+                      <button
+                        key={m.id}
+                        className={`start-overlay__brain${brainModel === m.id ? ' start-overlay__brain--on' : ''}`}
+                        onClick={() => selectBrainModel(m.id)}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <button className="start-overlay__btn" onClick={startShift}>
-                {keyStatus === 'valid' ? 'Start Shift · Live Jev' : 'Start Demo Shift'}
+                {keyStatus === 'valid'
+                  ? brainModel === 'jev'
+                    ? 'Start Shift · Live Jev'
+                    : `Start Shift · ${BRAIN_MODELS.find((m) => m.id === brainModel)?.label ?? brainModel}`
+                  : 'Start Demo Shift'}
               </button>
               <label className="start-overlay__rec">
                 <input

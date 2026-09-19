@@ -173,10 +173,16 @@ const BREAKER_THRESHOLD = 3;
 const BREAKER_COOLDOWN_MS = 20_000;
 
 export class RemoteJevBrain implements JevBrain {
-  readonly name = 'typesafe-ai/jev';
+  readonly name: string;
   private fallback = new LocalJevBrain();
 
-  constructor(private endpoint: string, private apiKey: string) {}
+  constructor(
+    private endpoint: string,
+    private apiKey: string,
+    private brainModel: string = 'jev',
+  ) {
+    this.name = brainModel === 'jev' ? 'typesafe-ai/jev' : brainModel;
+  }
 
   async decide(req: DecisionRequest): Promise<JevDecision> {
     if (Date.now() < breaker.openUntil) return this.fallback.decide(req);
@@ -195,6 +201,7 @@ export class RemoteJevBrain implements JevBrain {
           gameTime: req.gameTime,
           options: req.options,
           state: req.state,
+          brainModel: this.brainModel,
         }),
       });
       const latencyMs = Date.now() - start;
@@ -275,11 +282,11 @@ export class RemoteJevBrain implements JevBrain {
 }
 
 export function makeBrainFactory(
-  cfg: { endpoint?: string; apiKey?: string } | null,
+  cfg: { endpoint?: string; apiKey?: string; brainModel?: string } | null,
 ): (chefId: number) => JevBrain {
   if (cfg && cfg.endpoint) {
-    const { endpoint, apiKey } = cfg;
-    return () => new RemoteJevBrain(endpoint, apiKey ?? '');
+    const { endpoint, apiKey, brainModel } = cfg;
+    return () => new RemoteJevBrain(endpoint, apiKey ?? '', brainModel ?? 'jev');
   }
   return () => new LocalJevBrain();
 }

@@ -20,6 +20,13 @@ const OR_MODEL = 'typesafe/jev-1.13';
 const OR_DECISIONS_URL = 'https://openrouter.ai/api/alpha/decisions';
 const PRICE_PER_TOKEN = 0.042 / 1_000_000; // $0.042 / 1M input tokens (same list price on both providers)
 
+// LLM brains for benchmarking against Jev — same slugs on both providers.
+const LLM_MODELS = new Set([
+  'anthropic/claude-opus-4.8',
+  'anthropic/claude-haiku-4.5',
+  'deepseek/deepseek-v4-flash',
+]);
+
 type Provider = 'openrouter' | 'gateway';
 const providerFor = (key: string): Provider =>
   key.startsWith('sk-or-') ? 'openrouter' : 'gateway';
@@ -88,6 +95,7 @@ export async function POST(req: NextRequest) {
     gameTime?: number;
     options?: GameOption[];
     state?: unknown;
+    brainModel?: string;
   };
   try {
     body = await req.json();
@@ -126,6 +134,111 @@ export async function POST(req: NextRequest) {
       kitchen: body.state ?? {},
     }),
   );
+  // ── LLM brains (benchmark mode): any non-Jev model runs through the
+  // provider's OpenAI-compatible chat completions with a strict-JSON prompt.
+  const brainModel = (body.brainModel ?? 'jev').trim();
+  if (brainModel !== 'jev') {
+    if (!LLM_MODELS.has(brainModel)) {
+      return NextResponse.json({ error: `unknown brain model ${brainModel}` }, { status: 422 });
+    }
+    try {
+      const baseUrl =
+        provider === 'openrouter'
+          ? 'https://openrouter.ai/api/v1/chat/completions'
+          : 'https://ai-gateway.vercel.sh/v1/chat/completions';
+      const optionLines = options.map((o) => `- ${o.id}: ${o.label}`).join('\n');
+      const res = await fetch(baseUrl, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${key}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: brainModel,
+          max_tokens: 300,
+          ...(provider === 'openrouter' ? { usage: { include: true } } : {}),
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are one of four AI chefs in an Overcooked-style kitchen game. Pick the single best next action. Respond with ONLY a JSON object, no prose, in this exact shape: {"choice":"<option id>","confidence":<0..1>,"alternatives":[{"id":"<option id>","prob":<0..1>}, ...]} — alternatives must cover the plausible options (including the choice) with probabilities that roughly sum to 1.',
+            },
+            {
+              role: 'user',
+              content: `Game state:\n${JSON.stringify(stateForModel)}\n\nAvailable actions:\n${optionLines}\n\nPick the best action now.`,
+            },
+          ],
+        }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) {
+        const text = (await res.text()).slice(0, 200);
+        throw new Error(`${provider} ${res.status}: ${text}`);
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cc: any = await res.json();
+      const raw: string = cc?.choices?.[0]?.message?.content ?? '';
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error('no JSON in model response');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let parsed: any;
+      try {
+        parsed = JSON.parse(match[0]);
+      } catch {
+        throw new Error('unparseable JSON from model');
+      }
+      const validIds = new Set(options.map((o) => o.id));
+      const chosenId = typeof parsed.choice === 'string' && validIds.has(parsed.choice)
+        ? parsed.choice
+        : null;
+      if (!chosenId) throw new Error(`invalid choice: ${String(parsed.choice).slice(0, 40)}`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const altsRaw: any[] = Array.isArray(parsed.alternatives) ? parsed.alternatives : [];
+      let policy = altsRaw
+        .filter((a) => a && typeof a.id === 'string' && validIds.has(a.id))
+        .map((a) => ({
+          id: a.id as string,
+          label: options.find((o) => o.id === a.id)?.label ?? a.id,
+          prob: typeof a.prob === 'number' ? Math.max(0, a.prob) : 0,
+        }));
+      if (!policy.some((p) => p.id === chosenId)) {
+        policy.push({
+          id: chosenId,
+          label: options.find((o) => o.id === chosenId)?.label ?? chosenId,
+          prob: 0.6,
+        });
+      }
+      const norm = policy.reduce((a, b) => a + b.prob, 0) || 1;
+      policy = policy
+        .map((e) => ({ ...e, prob: e.prob / norm }))
+        .sort((a, b) => b.prob - a.prob)
+        .slice(0, 5);
+      const confidence =
+        typeof parsed.confidence === 'number'
+          ? Math.min(1, Math.max(0, parsed.confidence))
+          : (policy[0]?.prob ?? 0.6);
+      const usage = cc?.usage ?? {};
+      const tokens = Number(usage.prompt_tokens ?? 0) + Number(usage.completion_tokens ?? 0) || 500;
+      const costUsd = typeof usage.cost === 'number' ? usage.cost : 0;
+      return NextResponse.json({
+        chosenId,
+        policy,
+        confidence,
+        latencyMs: Date.now() - t0,
+        tokens,
+        costUsd,
+        provider,
+        model: brainModel,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'llm decide failed';
+      return NextResponse.json(
+        { error: message, latencyMs: Date.now() - t0 },
+        { status: 502 },
+      );
+    }
+  }
+
   const questions = {
     next_action: {
       type: 'choice' as const,

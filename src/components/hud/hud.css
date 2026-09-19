@@ -929,3 +929,17 @@
   transition: border-color 120ms ease;
 }
 .mute-chip:hover { border-color: var(--dim); }
+
+/* brain (model) picker for benchmarking */
+.start-overlay__brains { display: flex; flex-direction: column; gap: 7px; align-items: center; }
+.start-overlay__brainrow { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: 560px; }
+.start-overlay__brain {
+  padding: 7px 12px;
+  font-family: var(--font-mono), 'IBM Plex Mono', monospace;
+  font-size: 10px; letter-spacing: 0.04em;
+  color: var(--dim); background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--panel-edge); border-radius: 5px; cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.start-overlay__brain:hover { border-color: var(--dim); color: var(--text); }
+.start-overlay__brain--on { border-color: var(--p3); color: var(--p3); background: rgba(255, 193, 77, 0.06); }
