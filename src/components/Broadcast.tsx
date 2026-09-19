@@ -14,6 +14,7 @@ const DEFAULT_ENDPOINT = process.env.NEXT_PUBLIC_JEV_API_URL ?? '/api/jev-decide
 const KEY_STORAGE = 'jev-gateway-key';
 const LEGACY_KEY_STORAGE = 'jev-api-key';
 const LIVE_BRAIN_NAME = 'typesafe-ai/jev (live via AI Gateway)';
+const LIVE_BRAIN_NAME_OR = 'typesafe/jev-1.13 (live via OpenRouter)';
 const LOCAL_BRAIN_NAME = 'jev-local (emulated)';
 
 type KeyStatus = 'none' | 'checking' | 'valid' | 'invalid';
@@ -159,7 +160,11 @@ export default function Broadcast() {
           method: 'GET',
           headers: { 'x-gateway-key': trimmed },
         });
-        const health = (await res.json()) as { valid?: boolean; balance?: number };
+        const health = (await res.json()) as {
+          valid?: boolean;
+          balance?: number;
+          provider?: string;
+        };
         if (!res.ok || !health.valid) {
           setKeyStatus('invalid');
           return;
@@ -168,7 +173,7 @@ export default function Broadcast() {
           localStorage.setItem(KEY_STORAGE, trimmed);
         } catch {}
         sim.setBrains(makeBrainFactory({ endpoint: DEFAULT_ENDPOINT, apiKey: trimmed }));
-        setBrainName(LIVE_BRAIN_NAME);
+        setBrainName(health.provider === 'openrouter' ? LIVE_BRAIN_NAME_OR : LIVE_BRAIN_NAME);
         setBalance(typeof health.balance === 'number' ? health.balance : null);
         setKeyTail(trimmed.slice(-4));
         setKeyInput('');
@@ -330,7 +335,7 @@ export default function Broadcast() {
                     <input
                       className="start-overlay__key hud-mono"
                       type="password"
-                      placeholder="Paste your Vercel AI Gateway key (vck_…)"
+                      placeholder="Vercel AI Gateway (vck_…) or OpenRouter (sk-or-…) key"
                       value={keyInput}
                       autoComplete="off"
                       onChange={(e) => setKeyInput(e.target.value)}
@@ -356,7 +361,7 @@ export default function Broadcast() {
                         ? '✗ The gateway rejected this key. It should start with vck_ — check and retry.'
                         : keyStatus === 'checking'
                           ? 'Checking your key with the gateway…'
-                          : 'Costs run on your gateway credits (~$0.01 per game). The key stays in this browser — our server never stores it.'}
+                          : 'Works with Vercel AI Gateway or OpenRouter credits (~$0.01 per game). The key stays in this browser — our server never stores it.'}
                 </div>
               </div>
               <button className="start-overlay__btn" onClick={startShift}>
@@ -373,7 +378,7 @@ export default function Broadcast() {
               <div className="start-overlay__model hud-mono">
                 {keyStatus === 'valid'
                   ? `model: ${brainName}`
-                  : 'No key? The demo runs a built-in imitation of Jev — free. Get a real key at vercel.com → AI Gateway.'}
+                  : 'No key? The demo runs a built-in imitation of Jev — free. Get a key at vercel.com → AI Gateway or openrouter.ai → Keys.'}
               </div>
             </div>
           )}

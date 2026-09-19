@@ -1,12 +1,12 @@
 // ─────────────────────────────────────────────────────────────
-// Jev decision proxy — BYOK (bring your own key).
+// Jev decision proxy — BYOK (bring your own key), dual provider.
 // The browser POSTs the game's DecisionRequest with the visitor's
-// own Vercel AI Gateway key in x-gateway-key; we reformulate it as
-// a single TypeSafe Jev `choice` question and evaluate it through
-// the gateway (model typesafe-ai/jev). The key is used per-request
-// only — never stored, never read from server env.
-// GET with x-gateway-key validates a key and returns its credit
-// balance; GET without a key describes the endpoint.
+// key in x-gateway-key; we reformulate it as a single TypeSafe Jev
+// `choice` question and evaluate it through:
+//   vck_…   → Vercel AI Gateway (AI SDK evaluate, typesafe-ai/jev)
+//   sk-or-… → OpenRouter Decisions API (typesafe/jev-1.13)
+// The key is used per-request only — never stored, never in env.
+// GET with a key validates it and returns its credit balance.
 // ─────────────────────────────────────────────────────────────
 import { NextRequest, NextResponse } from 'next/server';
 import { experimental_evaluate as evaluate } from 'ai';
@@ -16,7 +16,13 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
 
 const MODEL = 'typesafe-ai/jev';
-const PRICE_PER_TOKEN = 0.042 / 1_000_000; // $0.042 / 1M input tokens
+const OR_MODEL = 'typesafe/jev-1.13';
+const OR_DECISIONS_URL = 'https://openrouter.ai/api/alpha/decisions';
+const PRICE_PER_TOKEN = 0.042 / 1_000_000; // $0.042 / 1M input tokens (same list price on both providers)
+
+type Provider = 'openrouter' | 'gateway';
+const providerFor = (key: string): Provider =>
+  key.startsWith('sk-or-') ? 'openrouter' : 'gateway';
 // Jev choice criteria keys must be plain identifiers; game ids contain ':'.
 const safeKey = (id: string) => id.replace(/[^a-zA-Z0-9_]/g, '_');
 
@@ -35,7 +41,27 @@ export async function GET(req: NextRequest) {
   if (!key) {
     return NextResponse.json({ byok: true, configured: false, model: MODEL });
   }
+  const provider = providerFor(key);
   try {
+    if (provider === 'openrouter') {
+      const res = await fetch('https://openrouter.ai/api/v1/credits', {
+        headers: { authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) throw new Error(`http ${res.status}`);
+      const j = (await res.json()) as {
+        data?: { total_credits?: number; total_usage?: number };
+      };
+      const total = Number(j.data?.total_credits ?? 0);
+      const used = Number(j.data?.total_usage ?? 0);
+      return NextResponse.json({
+        valid: true,
+        provider,
+        model: OR_MODEL,
+        balance: Math.max(0, total - used),
+        totalUsed: used,
+      });
+    }
     const gw = createGateway({ apiKey: key });
     const credits = (await gw.getCredits()) as {
       balance?: unknown;
@@ -44,12 +70,13 @@ export async function GET(req: NextRequest) {
     };
     return NextResponse.json({
       valid: true,
+      provider,
       model: MODEL,
       balance: Number(credits.balance ?? 0),
       totalUsed: Number(credits.totalUsed ?? credits.total_used ?? 0),
     });
   } catch {
-    return NextResponse.json({ valid: false, model: MODEL }, { status: 401 });
+    return NextResponse.json({ valid: false, provider, model: MODEL }, { status: 401 });
   }
 }
 
@@ -78,10 +105,11 @@ export async function POST(req: NextRequest) {
   const key = readKey(req);
   if (!key) {
     return NextResponse.json(
-      { error: 'byok: send your Vercel AI Gateway key in x-gateway-key' },
+      { error: 'byok: send your Vercel AI Gateway or OpenRouter key in x-gateway-key' },
       { status: 401 },
     );
   }
+  const provider = providerFor(key);
 
   const idBySafe = new Map<string, string>();
   const criteria: Record<string, string> = {};
@@ -91,30 +119,51 @@ export async function POST(req: NextRequest) {
     criteria[k] = o.label;
   }
 
+  const stateForModel = JSON.parse(
+    JSON.stringify({
+      role: `You are chef ${body.chefId ?? 0} (one of four AI chefs) in an Overcooked-style kitchen. Maximize dishes served before their order deadlines; never let cooked food burn; fires are emergencies.`,
+      gameTime: body.gameTime ?? 0,
+      kitchen: body.state ?? {},
+    }),
+  );
+  const questions = {
+    next_action: {
+      type: 'choice' as const,
+      instructions:
+        'Pick the single best next action for this chef right now, weighing order deadlines, distances, what the chef is carrying, and any fires.',
+      criteria,
+    },
+  };
+
   try {
-    const gw = createGateway({ apiKey: key });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result: any = await evaluate({
-      // Fail fast: the game has a local fallback brain, so a rate-limited
-      // call must return quickly instead of stalling the chef ~7s in retries.
-      maxRetries: 0,
-      model: gw.evaluationModel(MODEL),
-      state: JSON.parse(
-        JSON.stringify({
-          role: `You are chef ${body.chefId ?? 0} (one of four AI chefs) in an Overcooked-style kitchen. Maximize dishes served before their order deadlines; never let cooked food burn; fires are emergencies.`,
-          gameTime: body.gameTime ?? 0,
-          kitchen: body.state ?? {},
-        }),
-      ),
-      questions: {
-        next_action: {
-          type: 'choice',
-          instructions:
-            'Pick the single best next action for this chef right now, weighing order deadlines, distances, what the chef is carrying, and any fires.',
-          criteria,
+    let result: any;
+    if (provider === 'openrouter') {
+      const res = await fetch(OR_DECISIONS_URL, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${key}`,
+          'content-type': 'application/json',
         },
-      },
-    });
+        body: JSON.stringify({ model: OR_MODEL, state: stateForModel, questions }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        const text = (await res.text()).slice(0, 200);
+        throw new Error(`openrouter ${res.status}: ${text}`);
+      }
+      result = await res.json();
+    } else {
+      const gw = createGateway({ apiKey: key });
+      result = await evaluate({
+        // Fail fast: the game has a local fallback brain, so a rate-limited
+        // call must return quickly instead of stalling the chef ~7s in retries.
+        maxRetries: 0,
+        model: gw.evaluationModel(MODEL),
+        state: stateForModel,
+        questions,
+      });
+    }
 
     const answer = result?.answers?.next_action ?? {};
     const chosenSafe: string | undefined =
@@ -162,7 +211,8 @@ export async function POST(req: NextRequest) {
       latencyMs: Date.now() - t0,
       tokens,
       costUsd,
-      model: MODEL,
+      provider,
+      model: provider === 'openrouter' ? OR_MODEL : MODEL,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'evaluate failed';
