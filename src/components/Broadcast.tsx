@@ -52,6 +52,7 @@ export default function Broadcast() {
   const [brainName, setBrainName] = useState(LOCAL_BRAIN_NAME);
   const [keyStatus, setKeyStatus] = useState<KeyStatus>('none');
   const [keyInput, setKeyInput] = useState('');
+  const [keyTail, setKeyTail] = useState('');
   const [balance, setBalance] = useState<number | null>(null);
   const [started, setStarted] = useState(false);
   const startedRef = useRef(false);
@@ -169,6 +170,8 @@ export default function Broadcast() {
         sim.setBrains(makeBrainFactory({ endpoint: DEFAULT_ENDPOINT, apiKey: trimmed }));
         setBrainName(LIVE_BRAIN_NAME);
         setBalance(typeof health.balance === 'number' ? health.balance : null);
+        setKeyTail(trimmed.slice(-4));
+        setKeyInput('');
         setKeyStatus('valid');
       } catch {
         setKeyStatus('invalid');
@@ -185,6 +188,20 @@ export default function Broadcast() {
       if (saved) void connectRemote(saved);
     } catch {}
   }, [connectRemote]);
+
+  // Drop the saved key and fall back to the demo brain.
+  const forgetKey = useCallback(() => {
+    try {
+      localStorage.removeItem(KEY_STORAGE);
+      localStorage.removeItem(LEGACY_KEY_STORAGE);
+    } catch {}
+    sim.setBrains(makeBrainFactory(null));
+    setBrainName(LOCAL_BRAIN_NAME);
+    setKeyStatus('none');
+    setKeyTail('');
+    setBalance(null);
+    setKeyInput('');
+  }, [sim]);
 
   const getState = useCallback((): SimState => sim.state, [sim]);
 
@@ -299,29 +316,40 @@ export default function Broadcast() {
               </p>
               <div className="start-overlay__byok">
                 <div className="hud-microlabel">Play with the real Jev — use your own key</div>
-                <div className="start-overlay__byokrow">
-                  <input
-                    className="start-overlay__key hud-mono"
-                    type="password"
-                    placeholder="Paste your Vercel AI Gateway key (vck_…)"
-                    value={keyInput}
-                    autoComplete="off"
-                    onChange={(e) => setKeyInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && void connectRemote(keyInput)}
-                  />
-                  <button
-                    className="start-overlay__connect"
-                    disabled={keyStatus === 'checking' || !keyInput.trim()}
-                    onClick={() => void connectRemote(keyInput)}
-                  >
-                    {keyStatus === 'checking' ? 'Checking…' : 'Connect'}
-                  </button>
-                </div>
+                {keyStatus === 'valid' ? (
+                  <div className="start-overlay__byokrow">
+                    <div className="start-overlay__savedkey hud-mono">
+                      🔑 vck_…{keyTail || '····'} saved in this browser
+                    </div>
+                    <button className="start-overlay__connect" onClick={forgetKey}>
+                      Forget key
+                    </button>
+                  </div>
+                ) : (
+                  <div className="start-overlay__byokrow">
+                    <input
+                      className="start-overlay__key hud-mono"
+                      type="password"
+                      placeholder="Paste your Vercel AI Gateway key (vck_…)"
+                      value={keyInput}
+                      autoComplete="off"
+                      onChange={(e) => setKeyInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && void connectRemote(keyInput)}
+                    />
+                    <button
+                      className="start-overlay__connect"
+                      disabled={keyStatus === 'checking' || !keyInput.trim()}
+                      onClick={() => void connectRemote(keyInput)}
+                    >
+                      {keyStatus === 'checking' ? 'Checking…' : 'Connect'}
+                    </button>
+                  </div>
+                )}
                 <div
                   className={`start-overlay__keystatus hud-mono start-overlay__keystatus--${keyStatus}`}
                 >
                   {keyStatus === 'valid' && balance != null
-                    ? `✓ Connected — $${balance.toFixed(2)} gateway credit. A full game costs about $0.01.`
+                    ? `✓ Connected — $${balance.toFixed(2)} gateway credit. A full game costs about $0.01. Refreshing keeps you connected.`
                     : keyStatus === 'valid'
                       ? '✓ Connected — every decision now comes from the real Jev API.'
                       : keyStatus === 'invalid'

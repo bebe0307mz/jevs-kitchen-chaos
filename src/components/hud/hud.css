@@ -898,3 +898,13 @@
 .start-overlay__keystatus { font-size: 10px; letter-spacing: 0.05em; color: var(--dim); min-height: 1.2em; }
 .start-overlay__keystatus--valid { color: var(--good); }
 .start-overlay__keystatus--invalid { color: var(--p1); }
+
+/* saved-key row (BYOK persisted in localStorage) */
+.start-overlay__savedkey {
+  display: flex; align-items: center;
+  padding: 10px 14px;
+  font-size: 11px; letter-spacing: 0.05em; color: var(--good);
+  background: rgba(49, 217, 124, 0.06);
+  border: 1px solid rgba(49, 217, 124, 0.3);
+  border-radius: 6px;
+}
