@@ -137,6 +137,7 @@ export interface Order {
   assemblyStationId: number | null;  // PLATES station holding ready parts
   assemblerId: number | null;        // chef assembling/delivering, else null
   rushed?: boolean;                  // assembled before all components ready
+  rushedMissing?: number;            // parts missing at assemble time (for the fail message)
 }
 
 // Lightweight per-order view of parts sitting at an assembly station,

@@ -34,8 +34,27 @@ function fail(msg: string): never {
 }
 
 async function main(): Promise<void> {
-  // zero-latency brains so decisions resolve as fast as the event loop allows
-  const sim = new KitchenSim(() => new LocalJevBrain(0), { shiftLength: 100000 });
+  // zero-latency brains so decisions resolve as fast as the event loop allows.
+  // Brains are wrapped to assert the mistake-feedback contract on every request:
+  // state must carry score + recentMistakes (models are stateless — this is
+  // their only channel for seeing their own penalties).
+  let feedbackChecked = 0;
+  const sim = new KitchenSim(() => {
+    const b = new LocalJevBrain(0);
+    const orig = b.decide.bind(b);
+    b.decide = (req) => {
+      const st = req.state as Record<string, unknown>;
+      assert(typeof st.score === 'number', 'brain state missing numeric score');
+      assert(Array.isArray(st.recentMistakes), 'brain state missing recentMistakes array');
+      for (const m of st.recentMistakes as Record<string, unknown>[]) {
+        assert(typeof m.what === 'string' && typeof m.byMe === 'boolean' && typeof m.pointsLost === 'number',
+          `malformed recentMistakes entry: ${JSON.stringify(m)}`);
+      }
+      feedbackChecked++;
+      return orig(req);
+    };
+    return b;
+  }, { shiftLength: 100000 });
 
   // Longest streak (seconds) a chef sat on COMMITTED work — carrying an item OR
   // holding a workingOrderId — while idle and with no decision in flight AND no
@@ -174,6 +193,7 @@ async function main(): Promise<void> {
   assert(s.events.length <= 30, `events not capped: ${s.events.length}`);
   assert(tokens > 0, 'no tokens accumulated');
   assert(cost > 0, 'no cost accumulated');
+  assert(feedbackChecked > 100, `mistake-feedback contract barely exercised (${feedbackChecked} decisions)`);
 
   console.log('\n✅ ALL ASSERTIONS PASSED');
   process.exit(0);

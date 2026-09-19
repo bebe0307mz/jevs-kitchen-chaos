@@ -60,6 +60,9 @@ export class KitchenSim {
   private fullEvents: SimEvent[] = [];
   private shiftOverAnnounced = false;
   private assemblyRR = 0; // round-robin cursor over PLATES stations
+  // rolling ledger of penalties/losses, surfaced to brains as state.recentMistakes
+  // so a model can condition on its own recent failures (it has no memory otherwise)
+  private mistakes: { what: string; dish: DishId; penalty: number; chefId: number | null; at: number }[] = [];
 
   constructor(makeBrain: (chefId: number) => JevBrain, opts?: { shiftLength?: number }) {
     this.makeBrain = makeBrain;
@@ -289,10 +292,16 @@ export class KitchenSim {
   // Fail an order: mark failed, free every chef working any of its components or
   // its assembly, and discard its deposited ready parts. Stove items for it
   // become orphans (rescue targets) automatically since no open order needs them.
+  private recordMistake(what: string, dish: DishId, penalty: number, chefId: number | null) {
+    this.mistakes.push({ what, dish, penalty, chefId, at: this.state.t });
+    if (this.mistakes.length > 8) this.mistakes.shift();
+  }
+
   private failOrder(o: Order) {
     o.status = 'failed';
     this.state.failed++;
     this.pushEvent('fail', `${RECIPES[o.dish].name} #${o.id} expired`);
+    this.recordMistake('order-expired-unserved', o.dish, 0, null);
     for (const r of this.rt) {
       if (r.chef.workingOrderId === o.id) {
         this.abandonTask(r, true);
@@ -751,6 +760,15 @@ export class KitchenSim {
     for (const o of options) distances[o.id] = this.optionDistance(c, o.id);
 
     const state: Record<string, unknown> = {
+      score: this.state.score,
+      // recent penalties, most recent last — byMe flags this chef's own failures
+      recentMistakes: this.mistakes.slice(-3).map((m) => ({
+        what: m.what,
+        dish: RECIPES[m.dish].name,
+        pointsLost: m.penalty,
+        byMe: m.chefId === c.id,
+        secondsAgo: Math.max(0, Math.round(now - m.at)),
+      })),
       orders: this.state.orders
         .filter((o) => o.status === 'open')
         .slice(0, 10)
@@ -943,7 +961,9 @@ export class KitchenSim {
       onDone: (sim, rr) => {
         // completeness is judged when the dish leaves the plate station —
         // components that finished during the walk still count.
-        o.rushed = !o.components.every((comp) => comp.status === 'ready');
+        const missingNow = o.components.filter((comp) => comp.status !== 'ready').length;
+        o.rushed = missingNow > 0;
+        if (o.rushed) o.rushedMissing = missingNow;
         // parts still in prep no longer have a home; revert them so the work
         // isn't silently lost (preppers will re-decide).
         if (o.rushed) {
@@ -976,6 +996,7 @@ export class KitchenSim {
       this.state.score -= penalty;
       c.workingOrderId = null;
       this.pushEvent('fail', `${c.name} served ${RECIPES[o.dish].name} nobody wanted (−${penalty})`);
+      this.recordMistake('served-expired-order', o.dish, penalty, c.id);
       r.steps = [{
         kind: 'work',
         stationId: this.station(T.SERVE)!.id,
@@ -991,7 +1012,9 @@ export class KitchenSim {
     if (o.rushed) {
       // Wrong/incomplete dish reached the customer: no credit, half-points
       // penalty, and the order is gone.
-      const missing = o.components.filter((comp) => comp.status !== 'ready').length;
+      // report the shortfall as it was when the dish left the plate station —
+      // parts finishing mid-carry would otherwise undercount to zero here.
+      const missing = o.rushedMissing ?? o.components.filter((comp) => comp.status !== 'ready').length;
       const penalty = Math.floor(RECIPES[o.dish].points / 2);
       this.state.score -= penalty;
       this.state.failed++;
@@ -999,6 +1022,7 @@ export class KitchenSim {
       c.workingOrderId = null;
       o.assemblerId = null;
       o.assemblyStationId = null;
+      this.recordMistake('served-incomplete-dish', o.dish, penalty, c.id);
       this.pushEvent(
         'fail',
         `${c.name} served an incomplete ${RECIPES[o.dish].name} — ${missing} part${missing === 1 ? '' : 's'} missing (−${penalty})`,

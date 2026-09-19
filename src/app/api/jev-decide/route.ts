@@ -130,7 +130,7 @@ export async function POST(req: NextRequest) {
 
   const stateForModel = JSON.parse(
     JSON.stringify({
-      role: `You are chef ${body.chefId ?? 0} (one of four AI chefs) in an Overcooked-style kitchen. Maximize dishes served before their order deadlines; never let cooked food burn; fires are emergencies.`,
+      role: `You are chef ${body.chefId ?? 0} (one of four AI chefs) in an Overcooked-style kitchen. Maximize dishes served before their order deadlines; never let cooked food burn; fires are emergencies. Serving an incomplete dish or a dish whose order already expired LOSES half its points — kitchen.recentMistakes lists penalties already taken this shift (byMe = your own); do not repeat them.`,
       gameTime: body.gameTime ?? 0,
       kitchen: body.state ?? {},
     }),
@@ -244,7 +244,7 @@ export async function POST(req: NextRequest) {
     next_action: {
       type: 'choice' as const,
       instructions:
-        'Pick the single best next action for this chef right now, weighing order deadlines, distances, what the chef is carrying, and any fires.',
+        'Pick the single best next action for this chef right now, weighing order deadlines, distances, what the chef is carrying, and any fires. Serving an incomplete dish or an expired order loses half its points; recentMistakes in the state lists penalties already taken — avoid repeating them.',
       criteria,
     },
   };
