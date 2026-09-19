@@ -345,9 +345,10 @@ export default function Broadcast() {
               <div className="end-overlay__label">Shift Over</div>
               <div className="end-overlay__score">{snap.score.toLocaleString()} PTS</div>
               <div className="end-overlay__strip">
-                {snap.served} served · {snap.failed} failed · {snap.fires} fires ·{' '}
-                {snap.telemetry.reduce((a, t) => a + t.decisions, 0)} decisions · $
-                {snap.telemetry.reduce((a, t) => a + t.totalCostUsd, 0).toFixed(4)}
+                {(() => {
+                  const m = sim.getShiftLog().metrics;
+                  return `${snap.served} served · ${snap.failed} failed · ${snap.fires} fires · ${m.decisions} decisions · p50 ${m.latencyMs.p50}ms · $${m.totalCostUsd.toFixed(4)}${m.costPerServe != null ? ` · $${m.costPerServe.toFixed(4)}/serve` : ''}`;
+                })()}
               </div>
               <table className="end-overlay__table">
                 <thead>

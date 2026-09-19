@@ -246,6 +246,19 @@ export interface DecisionLogEntry {
   applied: boolean;       // false if state moved on and the action was invalid
 }
 
+// Benchmark rollup computed over the FULL decision log (not the capped
+// telemetry buffers) — the comparison numbers between brains.
+export interface ShiftMetrics {
+  decisions: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  latencyMs: { mean: number; p50: number; p95: number; max: number };
+  decisionsPerMinute: number;
+  costPerPoint: number | null;   // totalCostUsd / score
+  costPerServe: number | null;   // totalCostUsd / served
+  applied: number;               // decisions whose action was still valid
+}
+
 export interface ShiftLog {
   model: string;
   shiftLength: number;
@@ -254,6 +267,7 @@ export interface ShiftLog {
   served: number;
   failed: number;
   fires: number;
+  metrics: ShiftMetrics;
   chefs: Array<{
     id: number;
     name: string;

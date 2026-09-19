@@ -1384,7 +1384,28 @@ export class KitchenSim {
 
   // Full shift log for offline analysis of how well the brain played.
   getShiftLog(): ShiftLog {
+    const lats = this.decisionLog.map((d) => d.decision.latencyMs).sort((a, b) => a - b);
+    const pct = (p: number) => (lats.length ? lats[Math.min(lats.length - 1, Math.floor(lats.length * p))] : 0);
+    const totalTokens = this.decisionLog.reduce((a, d) => a + d.decision.tokens, 0);
+    const totalCostUsd = this.decisionLog.reduce((a, d) => a + d.decision.costUsd, 0);
+    const minutes = Math.max(1e-6, this.state.t / 60);
+    const metrics = {
+      decisions: this.decisionLog.length,
+      totalTokens,
+      totalCostUsd,
+      latencyMs: {
+        mean: lats.length ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length) : 0,
+        p50: Math.round(pct(0.5)),
+        p95: Math.round(pct(0.95)),
+        max: Math.round(lats[lats.length - 1] ?? 0),
+      },
+      decisionsPerMinute: Math.round((this.decisionLog.length / minutes) * 10) / 10,
+      costPerPoint: this.state.score > 0 ? totalCostUsd / this.state.score : null,
+      costPerServe: this.state.served > 0 ? totalCostUsd / this.state.served : null,
+      applied: this.decisionLog.filter((d) => d.applied).length,
+    };
     return {
+      metrics,
       model: this.rt[0]?.brain.name ?? 'unknown',
       shiftLength: this.state.shiftEndsAt,
       endedAtGameTime: Math.round(this.state.t * 100) / 100,
