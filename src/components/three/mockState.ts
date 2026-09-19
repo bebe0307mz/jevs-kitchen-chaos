@@ -7,10 +7,22 @@
 // ─────────────────────────────────────────────────────────────
 import {
   KITCHEN_LAYOUT, GRID_W, GRID_H, T,
-  CHEF_DEFS,
-  type SimState, type Station, type Chef, type Order,
-  type ChefTelemetry, type TileKind, type JevDecision,
+  CHEF_DEFS, RECIPES,
+  type SimState, type Station, type Chef, type Order, type OrderComponent,
+  type Assembly, type ChefTelemetry, type TileKind, type JevDecision, type DishId,
 } from '@/game/types';
+
+// Build the OrderComponent list for a dish from its recipe, with an optional
+// per-component status override so the mock can show mixed prep progress.
+function orderComponents(dish: DishId, overrides: Partial<OrderComponent>[] = []): OrderComponent[] {
+  return RECIPES[dish].components.map((c, i) => ({
+    label: c.label,
+    ingredient: c.ingredient,
+    status: 'todo',
+    by: null,
+    ...overrides[i],
+  }));
+}
 
 // Build a station for every non-floor, non-counter tile (matches how a
 // real sim would enumerate interactable stations), then override a few
@@ -115,7 +127,7 @@ export function makeMockState(): SimState {
       carrying: null,
       action: 'chopping', actionProgress: 0.4,
       path: [], planLabel: 'Salad: chop tomato', moveLabel: 'Chop',
-      targetStationId: board0?.id ?? null,
+      targetStationId: board0?.id ?? null, workingOrderId: 3,
       inputDir: { x: 0, y: 0 }, inputBtn: 'A',
     },
     // P2 — walking, carrying a chopped tomato toward a stove
@@ -127,7 +139,7 @@ export function makeMockState(): SimState {
       carrying: { ingredient: 'tomato', stage: 'chopped' },
       action: 'walking', actionProgress: 0,
       path: [{ x: 2, y: 0 }], planLabel: 'Soup: to Stove 1', moveLabel: 'Walk -> Stove',
-      targetStationId: stove0?.id ?? null,
+      targetStationId: stove0?.id ?? null, workingOrderId: 1,
       inputDir: { x: 0.7, y: -0.7 }, inputBtn: null,
     },
     // P3 — celebrating a delivery, carrying a plated dish
@@ -136,10 +148,10 @@ export function makeMockState(): SimState {
       dishesServed: 0,
       x: 8.5, y: 1.6,
       facing: { x: 0, y: -1 },
-      carrying: { ingredient: 'meat', stage: 'plated', dish: 'burger' },
+      carrying: { ingredient: 'bun', stage: 'plated', dish: 'burger' },
       action: 'celebrating', actionProgress: 0.8,
       path: [], planLabel: 'Served Burger!', moveLabel: 'Deliver',
-      targetStationId: findStation(stations, T.SERVE, 0)?.id ?? null,
+      targetStationId: findStation(stations, T.SERVE, 0)?.id ?? null, workingOrderId: 2,
       inputDir: { x: 0, y: 0 }, inputBtn: 'B',
     },
     // P4 — panicking next to the fire
@@ -151,18 +163,65 @@ export function makeMockState(): SimState {
       carrying: null,
       action: 'panicking', actionProgress: 0.3,
       path: [], planLabel: 'FIRE! panic', moveLabel: 'Panic',
-      targetStationId: stove2?.id ?? null,
+      targetStationId: stove2?.id ?? null, workingOrderId: null,
       inputDir: { x: 0.2, y: -0.1 }, inputBtn: null,
     },
   ];
 
   const now = 42;
+
+  // Two PLATES stations double as assembly benches.
+  const plates0 = findStation(stations, T.PLATES, 0);
+  const plates1 = findStation(stations, T.PLATES, 1);
+
   const orders: Order[] = [
-    { id: 1, dish: 'soup', createdAt: now - 12, expiresAt: now + 48, claimedBy: 1, status: 'open' },
-    { id: 2, dish: 'burger', createdAt: now - 30, expiresAt: now + 8, claimedBy: null, status: 'open' },
-    { id: 3, dish: 'salad', createdAt: now - 5, expiresAt: now + 40, claimedBy: 0, status: 'open' },
-    { id: 4, dish: 'steak', createdAt: now - 2, expiresAt: now + 53, claimedBy: null, status: 'open' },
+    // Soup #1 — P2 prepping the base (walking a chopped tomato to a stove).
+    {
+      id: 1, dish: 'soup', createdAt: now - 12, expiresAt: now + 48, status: 'open',
+      components: orderComponents('soup', [{ status: 'prepping', by: 1 }, { status: 'todo' }]),
+      assemblyStationId: plates0?.id ?? null, assemblerId: null,
+    },
+    // Burger #2 — bun + patty already parked at plates0, tomato still to do.
+    {
+      id: 2, dish: 'burger', createdAt: now - 30, expiresAt: now + 8, status: 'open',
+      components: orderComponents('burger', [
+        { status: 'ready' },                 // bun
+        { status: 'ready' },                 // grilled patty
+        { status: 'prepping', by: 2 },       // chopped tomato
+      ]),
+      assemblyStationId: plates0?.id ?? null, assemblerId: 2,
+    },
+    // Salad #3 — P1 chopping the tomato.
+    {
+      id: 3, dish: 'salad', createdAt: now - 5, expiresAt: now + 40, status: 'open',
+      components: orderComponents('salad', [{ status: 'prepping', by: 0 }]),
+      assemblyStationId: plates1?.id ?? null, assemblerId: null,
+    },
+    // Steak #4 — untouched.
+    {
+      id: 4, dish: 'steak', createdAt: now - 2, expiresAt: now + 53, status: 'open',
+      components: orderComponents('steak'),
+      assemblyStationId: null, assemblerId: null,
+    },
   ];
+
+  // Parts physically waiting at assembly benches (what the 3D scene draws).
+  const assemblies: Assembly[] = [];
+  if (plates0) {
+    // Burger #2: bun + grilled patty ready, tomato not yet.
+    assemblies.push({
+      orderId: 2, dish: 'burger', stationId: plates0.id,
+      readyItems: [
+        { ingredient: 'bun', stage: 'raw' },
+        { ingredient: 'meat', stage: 'chopped' },
+      ],
+    });
+    // Soup #1: tomato base simmering elsewhere, garnish already chopped here.
+    assemblies.push({
+      orderId: 1, dish: 'soup', stationId: plates0.id,
+      readyItems: [{ ingredient: 'tomato', stage: 'chopped' }],
+    });
+  }
 
   return {
     t: now,
@@ -183,5 +242,6 @@ export function makeMockState(): SimState {
       { t: now - 15, kind: 'rush', text: 'RUSH HOUR started' },
     ],
     telemetry: [0, 1, 2, 3].map(makeTelemetry),
+    assemblies,
   };
 }

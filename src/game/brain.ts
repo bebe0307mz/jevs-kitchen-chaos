@@ -28,19 +28,23 @@ function softmax(scores: number[], temperature: number): number[] {
 
 // The compact state shape the sim serializes. We read defensively so the
 // brain never throws on a partial snapshot.
+interface OrderView {
+  id: number;
+  dish: string;
+  points?: number;
+  secondsLeft?: number;
+  components?: Array<{ label: string; status: string }>;
+  assemblyReady?: number;
+  totalComponents?: number;
+}
 interface StateView {
-  orders?: Array<{
-    id: number;
-    dish: string;
-    points?: number;
-    secondsLeft?: number;
-    claimedBy?: number | null;
-  }>;
+  orders?: OrderView[];
   carrying?: { ingredient: string; stage: string } | null;
-  claimedOrderId?: number | null;
-  claimedSecondsLeft?: number | null;
+  workingOrderId?: number | null;
+  workingSecondsLeft?: number | null;
   fireCount?: number;
   distances?: Record<string, number>; // option id → tiles away (approx)
+  teammates?: Array<{ chef: number; plan?: string; workingOrderId?: number | null; deciding?: boolean }>;
 }
 
 // Utility score for a single option given the state. Higher = more desirable.
@@ -54,29 +58,38 @@ function scoreOption(opt: ActionOption, state: StateView): number {
     return 100 + (state.fireCount ?? 1) * 10 + proximity;
   }
 
-  if (id === 'deliver') {
-    // Finishing a plated dish banks points; do it promptly.
-    const left = state.claimedSecondsLeft ?? 30;
-    return 70 + Math.max(0, 30 - left) + proximity * 0.5;
+  if (id.startsWith('assemble:')) {
+    // Finishing a fully-prepped dish banks points — finishing beats starting.
+    const oid = Number(id.slice('assemble:'.length));
+    const order = state.orders?.find((o) => o.id === oid);
+    const left = order?.secondsLeft ?? 30;
+    const urgency = Math.max(0, 40 - left); // more urgent as deadline nears
+    return 80 + urgency + proximity * 0.4;
   }
 
-  if (id === 'plate') return 60 + proximity * 0.4;
-  if (id === 'trash') return 55; // clear burnt items so hands are free
-  if (id.startsWith('collect:')) return 68 + proximity * 0.5;
-  if (id.startsWith('cook:')) return 50 + proximity * 0.5;
-  if (id.startsWith('chop:')) return 48 + proximity * 0.5;
-  if (id.startsWith('fetch:')) return 40 + proximity * 0.6;
+  if (id.startsWith('rescue:')) return 70 + proximity * 0.5; // burn prevention
 
-  if (id.startsWith('claim:')) {
-    const oid = Number(id.slice('claim:'.length));
+  if (id === 'trash') {
+    // Clear burnt/orphaned food so hands are free; only urgent for burnt carry.
+    return state.carrying?.stage === 'burnt' ? 55 : 12;
+  }
+
+  if (id.startsWith('prep:')) {
+    // prep:<orderId>:<compIdx>
+    const parts = id.split(':');
+    const oid = Number(parts[1]);
     const order = state.orders?.find((o) => o.id === oid);
-    if (!order) return 20;
-    const points = order.points ?? 20;
-    const left = order.secondsLeft ?? 60;
-    // Value high-point dishes; add urgency as the deadline approaches, but
-    // avoid claiming orders about to expire that we can't finish.
-    const urgency = left < 8 ? -10 : Math.max(0, 40 - left) * 0.6;
-    return 22 + points * 0.6 + urgency - proximity * 0.1;
+    const points = order?.points ?? 20;
+    const left = order?.secondsLeft ?? 60;
+    // urgency ramps as the deadline nears (but don't chase near-dead orders)
+    const urgency = left < 6 ? -8 : Math.max(0, 40 - left) * 0.5;
+    // finish what's started: +8 per already-ready component of this order
+    const ready = order?.assemblyReady ?? 0;
+    const progressBonus = ready * 8;
+    // slight penalty if teammates already work this order (spread the line)
+    const crowd = (state.teammates ?? []).filter((tm) => tm.workingOrderId === oid).length;
+    const crowdPenalty = crowd * 6;
+    return 45 + points * 0.35 + urgency + progressBonus - proximity * 0.5 - crowdPenalty;
   }
 
   if (id === 'wait') return 5;
@@ -100,7 +113,10 @@ function buildDecision(
   // Safety-critical top choices (put out a fire, grab food before it burns) are
   // never gambled away by exploration — always commit to them.
   const topId = entries[0].id;
-  const critical = topId.startsWith('extinguish:') || topId.startsWith('collect:');
+  const critical =
+    topId.startsWith('extinguish:') ||
+    topId.startsWith('rescue:') ||
+    topId.startsWith('assemble:');
 
   // argmax 90% of the time, otherwise sample from the distribution.
   let chosenId: string;

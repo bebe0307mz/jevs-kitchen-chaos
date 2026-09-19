@@ -50,7 +50,13 @@ export const COL = {
   tomatoStem: '#4c9a3a',
   meat: '#e59aa4',
   meatCooked: '#a5502f',
+  patty: '#5f3a24',       // grilled burger patty (dark)
+  pattySear: '#3f2517',   // seared crust
   pasta: '#e9cf8e',
+  pastaCooked: '#f0e4c0',  // pale boiled pasta
+  bun: '#e8a94f',         // golden-brown bun
+  bunBase: '#d9963c',     // bun underside
+  bunSheen: '#f6cd82',    // lighter sheen highlight
   plate: '#f4f6fb',
   plateEdge: '#d8dce6',
   serveGlow: '#ffd27a',

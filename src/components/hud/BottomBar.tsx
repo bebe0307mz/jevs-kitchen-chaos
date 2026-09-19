@@ -12,9 +12,11 @@ function chipPlan(chef: Chef): string {
   return p.toUpperCase();
 }
 
-// % time remaining on the order this chef has claimed, at sim time t.
+// % time remaining on the order this chef is working, at sim time t.
 function chefRemainingPct(chef: Chef, state: SimState): number | null {
-  const order = state.orders.find((o) => o.claimedBy === chef.id && o.status === 'open');
+  const order = state.orders.find(
+    (o) => o.id === chef.workingOrderId && o.status === 'open',
+  );
   if (!order) return null;
   const life = order.expiresAt - order.createdAt;
   if (life <= 0) return 0;
@@ -46,6 +48,17 @@ function Ticket({ order, t }: { order: Order; t: number }) {
       <div className="ticket__top">
         <span className="ticket__emoji">{DISH_EMOJI[order.dish]}</span>
         <span className="ticket__name">{recipe.name}</span>
+        {(order.components?.length ?? 0) > 1 && (
+          <span className="ticket__comps">
+            {order.components.map((c, i) => (
+              <span
+                key={i}
+                className={`ticket__compdot ticket__compdot--${c.status}`}
+                title={c.label}
+              />
+            ))}
+          </span>
+        )}
       </div>
       <div className="ticket__track">
         <div className={`ticket__fill${urgent ? ' urgent' : ''}`} style={{ width: `${frac * 100}%` }} />

@@ -12,10 +12,13 @@ import { useFrame } from '@react-three/fiber';
 import { Billboard, RoundedBox, Text } from '@react-three/drei';
 import {
   GRID_W, GRID_H, KITCHEN_LAYOUT, T,
-  type SimState, type Station,
+  type SimState, type Station, type Assembly, type DishId,
 } from '@/game/types';
 import { COL, TILE, tileToWorld, GEO, mat, hash2 } from './palette';
-import { ItemMesh, Tomato, MeatSlab, PastaBundle, Knife } from './FoodBits';
+import {
+  Tomato, MeatSlab, PastaBundle, Bun, Knife,
+  buildReadyComponent, buildPlate, buildComposedDish,
+} from './FoodBits';
 import { ParticlePool, type PoolHandle } from './Particles';
 
 const COUNTER_H = 0.55;
@@ -73,6 +76,7 @@ function Crate({ x, z, kind }: { x: number; z: number; kind: number }) {
       const pos: [number, number, number] = [dx, COUNTER_H + 0.14, dz];
       if (kind === T.CRATE_TOMATO) els.push(<group key={i} position={pos}><Tomato scale={1.15} /></group>);
       else if (kind === T.CRATE_MEAT) els.push(<group key={i} position={pos}><MeatSlab scale={1.1} /></group>);
+      else if (kind === T.CRATE_BUN) els.push(<group key={i} position={pos}><Bun scale={1.05} /></group>);
       else els.push(<group key={i} position={pos}><PastaBundle scale={1.0} /></group>);
     }
     return els;
@@ -81,6 +85,7 @@ function Crate({ x, z, kind }: { x: number; z: number; kind: number }) {
   const chip =
     kind === T.CRATE_TOMATO ? { label: 'T', color: COL.tomato }
     : kind === T.CRATE_MEAT ? { label: 'M', color: COL.meat }
+    : kind === T.CRATE_BUN ? { label: 'B', color: COL.bun }
     : { label: 'P', color: COL.pasta };
 
   return (
@@ -97,16 +102,167 @@ function Crate({ x, z, kind }: { x: number; z: number; kind: number }) {
   );
 }
 
-// ── plate stack ──────────────────────────────────────────────
-function PlateStack({ x, z }: { x: number; z: number }) {
+// ── plate stack + live assembly station (dynamic) ────────────
+// The PLATES tile doubles as an assembly bench: the sim parks ready
+// components here per open order (getState().assemblies). We rebuild
+// the parts group imperatively, only when a cheap signature changes,
+// and float an order chip above each in-progress build.
+const ASSEMBLY_TOP = COUNTER_H + 0.28; // top of the plate stack
+
+function assemblySignature(assemblies: Assembly[]): string {
+  // cheap change key: order id + dish + each readyItem ingredient:stage
+  let s = '';
+  for (const a of assemblies) {
+    s += `${a.orderId}/${a.dish}[`;
+    for (const it of a.readyItems) s += `${it.ingredient}:${it.stage},`;
+    s += ']';
+  }
+  return s;
+}
+
+function PlateStack({ x, z, stationId, getState }: { x: number; z: number; stationId: number; getState: () => SimState }) {
+  const partsRef = useRef<THREE.Group>(null);
+  const chipsRef = useRef<THREE.Group>(null);
+  const sig = useRef<string>('__init__');
+
+  useFrame(({ clock }) => {
+    const parts = partsRef.current;
+    const chips = chipsRef.current;
+    if (!parts || !chips) return;
+    const mine = getState().assemblies.filter((a) => a.stationId === stationId);
+    const nextSig = assemblySignature(mine);
+
+    // rebuild only on change (never per-frame)
+    if (nextSig !== sig.current) {
+      sig.current = nextSig;
+      parts.clear();
+      // two assemblies → offset side by side along X
+      const slotX = mine.length > 1 ? [-0.3, 0.3] : [0];
+      mine.forEach((a, ai) => {
+        const g = buildAssemblyGroup(a);
+        g.position.set(slotX[ai] ?? 0, ASSEMBLY_TOP, 0);
+        if (mine.length > 1) g.scale.setScalar(0.82);
+        parts.add(g);
+      });
+      // toggle the pre-built chip slots + set their order labels
+      for (let i = 0; i < chips.children.length; i++) {
+        const chipGroup = chips.children[i] as THREE.Group;
+        const a = mine[i];
+        chipGroup.visible = !!a;
+        if (a) {
+          chipGroup.position.x = slotX[i] ?? 0;
+          const label = chipGroup.userData.textApi as { set: (s: string, c: string) => void } | undefined;
+          label?.set(`#${a.orderId}`, dishVibe(a.dish));
+        }
+      }
+    }
+
+    // gentle float on the chips
+    const bob = Math.sin(clock.elapsedTime * 2) * 0.03;
+    chips.position.y = ASSEMBLY_TOP + 0.62 + bob;
+  });
+
   return (
     <group position={[x, 0, z]}>
       <CounterBodyStatic x={0} z={0} />
       {[0, 1, 2, 3, 4].map((i) => (
         <mesh key={i} geometry={GEO.cyl} material={mat({ color: i % 2 ? COL.plateEdge : COL.plate, rough: 0.4 })} position={[0, COUNTER_H + 0.1 + i * 0.035, 0]} scale={[0.42, 0.03, 0.42]} castShadow />
       ))}
+      {/* imperatively populated ready-component builds */}
+      <group ref={partsRef} />
+      {/* two floating order chips (billboards), toggled per assembly */}
+      <group ref={chipsRef} position={[0, ASSEMBLY_TOP + 0.62, 0]}>
+        <OrderChipSlot />
+        <OrderChipSlot />
+      </group>
     </group>
   );
+}
+
+// dish "vibe" color for the order chip so viewers can match part→ticket
+function dishVibe(dish: DishId): string {
+  return dish === 'burger' ? COL.bun
+    : dish === 'soup' ? COL.soup
+    : dish === 'steak' ? COL.meatCooked
+    : dish === 'pasta' ? COL.pastaCooked
+    : COL.tomatoStem; // salad
+}
+
+// A reusable floating order chip whose text can be set imperatively.
+function OrderChipSlot() {
+  const textRef = useRef<THREE.Mesh & { text?: string }>(null);
+  const plateRef = useRef<THREE.Mesh>(null);
+  // expose an imperative setter through userData so the parent can update
+  const onGroup = (g: THREE.Group | null) => {
+    if (!g) return;
+    g.userData.textApi = {
+      set: (s: string, c: string) => {
+        const t = textRef.current;
+        if (t) { t.text = s; (t as unknown as { sync?: () => void }).sync?.(); }
+        const p = plateRef.current;
+        if (p) (p.material as THREE.MeshStandardMaterial).color.set(c);
+      },
+    };
+  };
+  return (
+    <group ref={onGroup} visible={false}>
+      <Billboard>
+        <mesh ref={plateRef} geometry={GEO.cyl} material={mat({ color: '#15151c', rough: 0.6, transparent: true, opacity: 0.88 })} rotation={[Math.PI / 2, 0, 0]} scale={[0.19, 0.05, 0.19]} />
+        <Text ref={textRef as never} position={[0, 0, 0.04]} fontSize={0.15} color="#ffffff" anchorX="center" anchorY="middle" outlineWidth={0.008} outlineColor="#000">
+          #
+        </Text>
+      </Billboard>
+    </group>
+  );
+}
+
+// Build the stacked ready components for one assembly as a plain THREE.Group.
+// burger = bun bottom + patty + tomato (mini build); soup = bowl-ish parts;
+// otherwise a plate with the parts arranged around it.
+function buildAssemblyGroup(a: Assembly): THREE.Group {
+  const g = new THREE.Group();
+  if (a.dish === 'burger') {
+    g.add(buildPlate());
+    // stack in canonical burger order regardless of ready order, but only
+    // show the parts that are actually ready
+    const has = (ing: string, stage?: string) =>
+      a.readyItems.find((it) => it.ingredient === ing && (!stage || it.stage === stage));
+    let y = 0.05;
+    if (has('bun')) { const b = buildReadyComponent('bun', 'raw'); b.position.y = y; g.add(b); y += 0.07; }
+    if (has('meat')) { const p = buildReadyComponent('meat', 'chopped'); p.position.y = y; g.add(p); y += 0.06; }
+    if (has('tomato')) { const t = buildReadyComponent('tomato', 'chopped'); t.position.y = y; t.scale.setScalar(0.85); g.add(t); }
+    return g;
+  }
+  if (a.dish === 'soup') {
+    // bowl-ish arrangement: plate base + tomato parts clustered
+    const bowl = buildPlate();
+    bowl.add(makeDisc(COL.soup, 0.26, 0.04));
+    g.add(bowl);
+    a.readyItems.forEach((it, i) => {
+      const c = buildReadyComponent(it.ingredient, it.stage);
+      const ang = (i / Math.max(1, a.readyItems.length)) * Math.PI * 2;
+      c.position.set(Math.cos(ang) * 0.12, 0.09, Math.sin(ang) * 0.12);
+      c.scale.setScalar(0.75);
+      g.add(c);
+    });
+    return g;
+  }
+  // generic: plate + parts laid side by side
+  g.add(buildPlate());
+  a.readyItems.forEach((it, i) => {
+    const c = buildReadyComponent(it.ingredient, it.stage);
+    c.position.set((i - (a.readyItems.length - 1) / 2) * 0.22, 0.06, 0);
+    g.add(c);
+  });
+  return g;
+}
+
+// small helper disc (soup surface) using pooled geometry/material
+function makeDisc(color: string, r: number, y: number): THREE.Mesh {
+  const m = new THREE.Mesh(GEO.cyl, mat({ color, rough: 0.4 }));
+  m.position.y = y;
+  m.scale.set(r, 0.03, r);
+  return m;
 }
 // counter body without its own position group (already positioned by parent)
 function CounterBodyStatic({ x, z }: { x: number; z: number }) {
@@ -501,10 +657,12 @@ export function Stations({ getState }: { getState: () => SimState }) {
         case T.CRATE_TOMATO:
         case T.CRATE_MEAT:
         case T.CRATE_PASTA:
+        case T.CRATE_BUN:
           staticEls.push(<Crate key={key} x={x} z={z} kind={kind} />);
           break;
         case T.PLATES:
-          staticEls.push(<PlateStack key={key} x={x} z={z} />);
+          if (st) dynamicEls.push(<PlateStack key={key} x={x} z={z} stationId={st.id} getState={getState} />);
+          else staticEls.push(<CounterBodyStatic key={key} x={x} z={z} />);
           break;
         case T.TRASH:
           staticEls.push(<Trash key={key} x={x} z={z} />);

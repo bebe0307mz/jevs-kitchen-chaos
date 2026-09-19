@@ -13,7 +13,7 @@ export interface Point { x: number; y: number }
 export const T = {
   FLOOR: 0, COUNTER: 1, STOVE: 2, BOARD: 3,
   CRATE_TOMATO: 4, CRATE_MEAT: 5, CRATE_PASTA: 6,
-  PLATES: 7, SERVE: 8, TRASH: 9,
+  PLATES: 7, SERVE: 8, TRASH: 9, CRATE_BUN: 10,
 } as const;
 export type TileKind = (typeof T)[keyof typeof T];
 
@@ -26,7 +26,7 @@ export const KITCHEN_LAYOUT: number[][] = [
   [4,0,0,0,0,0,0,0,0,0,0,0,0,0,7],
   [5,0,0,0,0,0,0,0,0,0,0,0,0,0,7],
   [6,0,0,1,3,3,1,0,0,1,3,3,1,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [10,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   [1,0,0,1,1,1,1,0,0,1,1,1,1,0,9],
   [1,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
@@ -36,36 +36,71 @@ export const isWalkable = (t: number) => t === T.FLOOR;
 export const isStation = (t: number) => t !== T.FLOOR && t !== T.COUNTER;
 
 // ── Food ─────────────────────────────────────────────────────
-export type Ingredient = 'tomato' | 'meat' | 'pasta';
+export type Ingredient = 'tomato' | 'meat' | 'pasta' | 'bun';
 export type ItemStage = 'raw' | 'chopped' | 'cooked' | 'burnt' | 'plated';
 
 export interface Item {
   ingredient: Ingredient;
   stage: ItemStage;
-  dish?: DishId; // set once plated
+  dish?: DishId; // set once plated (assembled dish being carried)
 }
 
 export type DishId = 'salad' | 'soup' | 'burger' | 'steak' | 'pasta';
 
-export interface Recipe {
-  id: DishId;
-  name: string;
+// One preparable part of a dish. Chain: fetch → [chop] → [cook+collect] →
+// deposit at the order's assembly station.
+export interface RecipeComponent {
   ingredient: Ingredient;
   needsChop: boolean;
   needsCook: boolean;
-  chopTime: number;   // seconds of work
-  cookTime: number;   // seconds on stove
-  burnTime: number;   // seconds AFTER cooked until it burns
-  points: number;
-  orderTime: number;  // seconds customer will wait
+  chopTime: number;   // seconds of board work
+  cookTime: number;   // seconds on stove (unattended)
+  burnTime: number;   // seconds AFTER cooked until it burns on the stove
+  label: string;      // short human label e.g. "Grilled Patty"
 }
 
+export interface Recipe {
+  id: DishId;
+  name: string;
+  components: RecipeComponent[]; // 1..3 parts, prepared in ANY order by ANY chef
+  assembleTime: number;          // seconds to assemble once all parts are ready
+  points: number;
+  orderTime: number;             // seconds customer will wait
+}
+
+const comp = (
+  ingredient: Ingredient, needsChop: boolean, needsCook: boolean,
+  chopTime: number, cookTime: number, burnTime: number, label: string,
+): RecipeComponent => ({ ingredient, needsChop, needsCook, chopTime, cookTime, burnTime, label });
+
 export const RECIPES: Record<DishId, Recipe> = {
-  salad:  { id: 'salad',  name: 'Salad',  ingredient: 'tomato', needsChop: true,  needsCook: false, chopTime: 2.6, cookTime: 0,   burnTime: 0,  points: 15, orderTime: 45 },
-  soup:   { id: 'soup',   name: 'Soup',   ingredient: 'tomato', needsChop: true,  needsCook: true,  chopTime: 2.6, cookTime: 5,   burnTime: 10, points: 25, orderTime: 60 },
-  burger: { id: 'burger', name: 'Burger', ingredient: 'meat',   needsChop: true,  needsCook: true,  chopTime: 2.2, cookTime: 4.5, burnTime: 9,  points: 30, orderTime: 60 },
-  steak:  { id: 'steak',  name: 'Steak',  ingredient: 'meat',   needsChop: false, needsCook: true,  chopTime: 0,   cookTime: 6,   burnTime: 8,  points: 35, orderTime: 55 },
-  pasta:  { id: 'pasta',  name: 'Pasta',  ingredient: 'pasta',  needsChop: false, needsCook: true,  chopTime: 0,   cookTime: 5,   burnTime: 11, points: 40, orderTime: 70 },
+  salad: {
+    id: 'salad', name: 'Salad', assembleTime: 1.0, points: 15, orderTime: 50,
+    components: [comp('tomato', true, false, 2.6, 0, 0, 'Chopped Tomato')],
+  },
+  steak: {
+    id: 'steak', name: 'Steak', assembleTime: 1.0, points: 35, orderTime: 60,
+    components: [comp('meat', false, true, 0, 6, 8, 'Seared Steak')],
+  },
+  pasta: {
+    id: 'pasta', name: 'Pasta', assembleTime: 1.0, points: 40, orderTime: 70,
+    components: [comp('pasta', false, true, 0, 5, 11, 'Boiled Pasta')],
+  },
+  soup: {
+    id: 'soup', name: 'Soup', assembleTime: 1.2, points: 45, orderTime: 85,
+    components: [
+      comp('tomato', true, true, 2.6, 5, 10, 'Tomato Base'),
+      comp('tomato', true, false, 2.6, 0, 0, 'Fresh Garnish'),
+    ],
+  },
+  burger: {
+    id: 'burger', name: 'Burger', assembleTime: 1.4, points: 60, orderTime: 100,
+    components: [
+      comp('bun', false, false, 0, 0, 0, 'Bun'),
+      comp('meat', true, true, 2.2, 4.5, 9, 'Grilled Patty'),
+      comp('tomato', true, false, 2.6, 0, 0, 'Chopped Tomato'),
+    ],
+  },
 };
 
 export const DISH_EMOJI: Record<DishId, string> = {
@@ -84,14 +119,32 @@ export interface Station {
   inUseBy: number | null; // chef id actively working here
 }
 
-// ── Orders ───────────────────────────────────────────────────
+// ── Orders (task market: any chef preps any component) ──────
+export interface OrderComponent {
+  label: string;
+  ingredient: Ingredient;
+  status: 'todo' | 'prepping' | 'ready';
+  by: number | null;        // chef currently prepping (or who finished it)
+}
+
 export interface Order {
   id: number;
   dish: DishId;
   createdAt: number;
   expiresAt: number;
-  claimedBy: number | null; // chef id
   status: 'open' | 'done' | 'failed';
+  components: OrderComponent[];      // parallel to RECIPES[dish].components
+  assemblyStationId: number | null;  // PLATES station holding ready parts
+  assemblerId: number | null;        // chef assembling/delivering, else null
+}
+
+// Lightweight per-order view of parts sitting at an assembly station,
+// recomputed by the sim each tick for the 3D scene.
+export interface Assembly {
+  orderId: number;
+  dish: DishId;
+  stationId: number;                 // a PLATES station
+  readyItems: { ingredient: Ingredient; stage: ItemStage }[];
 }
 
 // ── Chefs ────────────────────────────────────────────────────
@@ -110,6 +163,7 @@ export interface Chef {
   actionProgress: number;  // 0..1 while working
   path: Point[];           // remaining waypoints (tile centers)
   dishesServed: number;    // lifetime dishes this chef delivered
+  workingOrderId: number | null; // order this chef is currently helping
   planLabel: string;       // human plan e.g. "Soup: chop tomato"
   moveLabel: string;       // micro move e.g. "Chop", "Walk → Stove 2"
   targetStationId: number | null;
@@ -127,8 +181,14 @@ export const CHEF_DEFS = [
 
 // ── Jev decision protocol (mirrors the Jev decisions API) ────
 export interface ActionOption {
-  id: string;     // machine id e.g. "claim:3" "fetch:tomato" "chop:12" "cook:2" "collect:2" "plate" "deliver" "trash" "extinguish:2" "wait"
-  label: string;  // short human label e.g. "Chop Tomato" (used in policy bars)
+  id: string;     // machine id:
+                  //   "prep:<orderId>:<compIdx>"  prepare one component end-to-end
+                  //   "assemble:<orderId>"        assemble ready parts + deliver
+                  //   "rescue:<stationId>"        collect/trash an orphaned stove item
+                  //   "extinguish:<stationId>"    fight a fire
+                  //   "trash"                     dump what you're carrying
+                  //   "wait"                      always present
+  label: string;  // short human label e.g. "Patty · Burger #7" (used in policy bars)
 }
 
 export interface DecisionRequest {
@@ -222,6 +282,7 @@ export interface SimState {
   rushUntil: number;      // t until which rush hour is active
   events: SimEvent[];     // most recent last, capped ~30
   telemetry: ChefTelemetry[];
+  assemblies: Assembly[]; // parts waiting at PLATES stations, per open order
 }
 
 // Sim implementation contract (game/sim.ts):

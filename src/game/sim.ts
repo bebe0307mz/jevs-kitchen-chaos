@@ -1,7 +1,7 @@
 import {
-  SimState, Chef, Station, Order, Item, Recipe, DishId, Ingredient,
-  JevBrain, JevDecision, DecisionRequest, ActionOption, ChefTelemetry,
-  SimEvent, ChefAction, Point, DecisionLogEntry, ShiftLog,
+  SimState, Chef, Station, Order, OrderComponent, Item, Recipe, RecipeComponent,
+  DishId, Ingredient, JevBrain, JevDecision, DecisionRequest, ActionOption,
+  ChefTelemetry, SimEvent, ChefAction, Point, DecisionLogEntry, ShiftLog, Assembly,
   T, TileKind, KITCHEN_LAYOUT, GRID_W, GRID_H, RECIPES, CHEF_DEFS, SHIFT_LENGTH,
 } from './types';
 // GRID_W / GRID_H are re-exported for consumers importing layout dims via sim.
@@ -9,23 +9,26 @@ export { GRID_W, GRID_H };
 import { findPath, pathToStation, isFloor } from './pathfinding';
 
 // ─────────────────────────────────────────────────────────────
-// KitchenSim: headless Overcooked-style simulation. Chefs do NOT plan
-// for themselves — whenever a chef runs out of task steps the sim asks
-// its JevBrain to pick a high-level action, then compiles that action
-// into an internal step chain (walk → work → place …). See types.ts for
-// the authoritative contract.
+// KitchenSim: headless Overcooked-style simulation with a task-market
+// decision model. Orders spawn with a component checklist; ANY chef can
+// prep ANY 'todo' component of ANY open order. When all components are
+// 'ready' at the order's assembly station, a chef assembles + delivers.
+// Chefs do NOT plan for themselves — whenever a chef runs out of task
+// steps the sim asks its JevBrain to pick a high-level action, then
+// compiles that action into an internal step chain. See types.ts for the
+// authoritative contract.
 // ─────────────────────────────────────────────────────────────
 
 const CHEF_SPEED = 2.6;      // tiles / second
 const B_HOLD = 0.25;         // seconds to hold the 'B' button for the HUD
 const DECISION_MIN_GAP = 0.25;
-const IDLE_REDECIDE = 2.0;   // re-request if idle this long with a stale plan
 
 // Internal step representation. A chef executes these in order; when the
 // list empties, the sim asks the brain for the next high-level action.
 type Step =
   | { kind: 'walkTo'; stand: Point; label: string }
   | { kind: 'work'; stationId: number; action: ChefAction; duration: number; label: string; onDone: (sim: KitchenSim, c: ChefRt) => void }
+  | { kind: 'awaitCook'; stationId: number; label: string; onDone: (sim: KitchenSim, c: ChefRt) => void }
   | { kind: 'instant'; label: string; run: (sim: KitchenSim, c: ChefRt) => void };
 
 // Runtime chef bundle: public Chef state + internal scheduling fields.
@@ -39,6 +42,9 @@ interface ChefRt {
   idleSince: number;         // sim time chef became idle with no steps
   wobble: number;            // perpendicular visual offset seed
   telemetry: ChefTelemetry;
+  // component this chef is currently prepping, resolved so onDone callbacks can
+  // update the right OrderComponent even as orders/components shift around.
+  prep: { orderId: number; compIdx: number } | null;
 }
 
 let nextOrderId = 1;
@@ -53,6 +59,7 @@ export class KitchenSim {
   private decisionLog: DecisionLogEntry[] = [];
   private fullEvents: SimEvent[] = [];
   private shiftOverAnnounced = false;
+  private assemblyRR = 0; // round-robin cursor over PLATES stations
 
   constructor(makeBrain: (chefId: number) => JevBrain, opts?: { shiftLength?: number }) {
     this.makeBrain = makeBrain;
@@ -70,26 +77,39 @@ export class KitchenSim {
       rushUntil: 0,
       events: [],
       telemetry: [],
+      assemblies: [],
     };
     this.buildStations();
     this.buildChefs();
     this.nextOrderAt = 6 + Math.random() * 4;
     // Seed opening orders so all four chefs have work from the first frame.
-    const openers: DishId[] = ['soup', 'steak', 'salad'];
+    // burger's 100s window keeps the flagship multi-component dish visible early.
+    const openers: DishId[] = ['salad', 'steak', 'burger'];
     for (let i = 0; i < openers.length; i++) {
-      const recipe = RECIPES[openers[i]];
-      this.state.orders.push({
-        id: nextOrderId++,
-        dish: openers[i],
-        createdAt: 0,
-        expiresAt: recipe.orderTime + i * 8,
-        claimedBy: null,
-        status: 'open',
-      });
+      this.state.orders.push(this.makeOrder(openers[i], 0, RECIPES[openers[i]].orderTime + i * 10));
     }
   }
 
   // ── setup ──────────────────────────────────────────────────
+  private makeOrder(dish: DishId, createdAt: number, expiresAt: number): Order {
+    const recipe = RECIPES[dish];
+    return {
+      id: nextOrderId++,
+      dish,
+      createdAt,
+      expiresAt,
+      status: 'open',
+      components: recipe.components.map((rc) => ({
+        label: rc.label,
+        ingredient: rc.ingredient,
+        status: 'todo' as const,
+        by: null,
+      })),
+      assemblyStationId: null,
+      assemblerId: null,
+    };
+  }
+
   private buildStations() {
     let id = 0;
     for (let y = 0; y < GRID_H; y++) {
@@ -137,6 +157,7 @@ export class KitchenSim {
         planLabel: 'Idle',
         moveLabel: '',
         targetStationId: null,
+        workingOrderId: null,
         inputDir: { x: 0, y: 0 },
         inputBtn: null,
       };
@@ -159,11 +180,12 @@ export class KitchenSim {
         bHoldUntil: 0,
         // Stagger the opening decisions (chef i waits i*0.35s) so four
         // identical states don't hit a deterministic brain simultaneously
-        // and all claim the same order.
+        // and all grab the same component.
         lastDecisionAt: i * 0.35 - DECISION_MIN_GAP,
         idleSince: 0,
         wobble: (i - 1.5) * 0.12,
         telemetry,
+        prep: null,
       });
     }
   }
@@ -187,7 +209,7 @@ export class KitchenSim {
       (s) => s.kind === T.STOVE && !s.onFire,
     );
     if (stoves.length === 0) return;
-    const cooking = stoves.filter((s) => s.item && s.item.stage === 'raw');
+    const cooking = stoves.filter((s) => s.item && s.item.stage !== 'burnt');
     const pool = cooking.length > 0 ? cooking : stoves;
     const target = pool[Math.floor(Math.random() * pool.length)];
     this.igniteStove(target);
@@ -226,12 +248,14 @@ export class KitchenSim {
     for (const r of this.rt) {
       this.advanceChef(r, dt, now);
     }
+
+    this.recomputeAssemblies();
   }
 
   // ── orders ─────────────────────────────────────────────────
   private spawnOrders(now: number) {
     const rush = now < this.state.rushUntil;
-    const maxOpen = rush ? 8 : 5;
+    const maxOpen = rush ? 6 : 4;
     const open = this.state.orders.filter((o) => o.status === 'open');
     if (now < this.nextOrderAt) return;
     if (open.length >= maxOpen) {
@@ -242,16 +266,8 @@ export class KitchenSim {
     const dishes = Object.keys(RECIPES) as DishId[];
     const dish = dishes[Math.floor(Math.random() * dishes.length)];
     const recipe = RECIPES[dish];
-    const order: Order = {
-      id: nextOrderId++,
-      dish,
-      createdAt: now,
-      expiresAt: now + recipe.orderTime,
-      claimedBy: null,
-      status: 'open',
-    };
-    this.state.orders.push(order);
-    const gap = rush ? 3 + Math.random() * 2 : 9 + Math.random() * 5;
+    this.state.orders.push(this.makeOrder(dish, now, now + recipe.orderTime));
+    const gap = rush ? 4 + Math.random() * 2 : 12 + Math.random() * 6;
     this.nextOrderAt = now + gap;
   }
 
@@ -259,14 +275,7 @@ export class KitchenSim {
     for (const o of this.state.orders) {
       if (o.status !== 'open') continue;
       if (now >= o.expiresAt) {
-        o.status = 'failed';
-        this.state.failed++;
-        this.pushEvent('fail', `${RECIPES[o.dish].name} #${o.id} expired`);
-        // free any chef working this order
-        if (o.claimedBy !== null) {
-          const r = this.rt[o.claimedBy];
-          if (r) this.abandonTask(r, true);
-        }
+        this.failOrder(o);
       }
     }
     // prune old resolved orders occasionally to keep the array bounded
@@ -275,6 +284,22 @@ export class KitchenSim {
         (o) => o.status === 'open' || now - o.expiresAt < 10,
       );
     }
+  }
+
+  // Fail an order: mark failed, free every chef working any of its components or
+  // its assembly, and discard its deposited ready parts. Stove items for it
+  // become orphans (rescue targets) automatically since no open order needs them.
+  private failOrder(o: Order) {
+    o.status = 'failed';
+    this.state.failed++;
+    this.pushEvent('fail', `${RECIPES[o.dish].name} #${o.id} expired`);
+    for (const r of this.rt) {
+      if (r.chef.workingOrderId === o.id) {
+        this.abandonTask(r, true);
+      }
+    }
+    o.assemblyStationId = null;
+    o.assemblerId = null;
   }
 
   // ── stations (cooking, burning, fire) ──────────────────────
@@ -286,10 +311,12 @@ export class KitchenSim {
       if (!item) continue;
       const recipe = this.recipeForStoveItem(item);
       if (!recipe) continue;
+      const rc = this.cookCompFor(item, recipe);
+      if (!rc) continue;
 
       if (item.stage === 'raw' || item.stage === 'chopped') {
         // cooking runs unattended
-        s.progress = Math.min(1, s.progress + dt / recipe.cookTime);
+        s.progress = Math.min(1, s.progress + dt / rc.cookTime);
         if (s.progress >= 1) {
           item.stage = 'cooked';
           s.progress = 0; // reuse progress as the "sitting cooked" timer
@@ -297,27 +324,70 @@ export class KitchenSim {
       } else if (item.stage === 'cooked') {
         // burn timer: progress climbs toward burnTime
         s.progress += dt;
-        if (s.progress >= recipe.burnTime) {
+        if (s.progress >= rc.burnTime) {
           item.stage = 'burnt';
           this.pushEvent('burn', `${recipe.name} burnt on Stove ${this.stoveLabel(s)}`);
+          // revert any component that was awaiting this cooked item so it can be
+          // re-prepped if time remains, then the fire destroys the pot.
+          this.revertComponentForStoveItem(item);
           this.igniteStove(s);
         }
       }
     }
+    void now;
   }
 
-  // Recipe whose cook path matches an item sitting on a stove.
+  // Recipe whose cook path matches an item sitting on a stove (best-effort;
+  // used only for labels + cook/burn timing).
   private recipeForStoveItem(item: Item): Recipe | null {
-    // Prefer the dish that needs cook and matches the ingredient + stage.
-    const dishes = Object.values(RECIPES).filter(
-      (r) => r.needsCook && r.ingredient === item.ingredient,
+    const dishes = Object.values(RECIPES).filter((r) =>
+      r.components.some(
+        (rc) => rc.needsCook && rc.ingredient === item.ingredient,
+      ),
     );
     if (dishes.length === 0) return null;
-    // If chopped, prefer a recipe that needsChop; if raw, one that doesn't.
-    const wantChop = item.stage === 'chopped';
+    const wantChop = item.stage === 'chopped' || item.stage === 'cooked';
     return (
-      dishes.find((r) => r.needsChop === wantChop) ?? dishes[0]
+      dishes.find((r) =>
+        r.components.some((rc) => rc.needsCook && rc.ingredient === item.ingredient && rc.needsChop === wantChop),
+      ) ?? dishes[0]
     );
+  }
+
+  // The cook component (timing source) matching an item on a stove.
+  private cookCompFor(item: Item, recipe: Recipe): RecipeComponent | null {
+    const wantChop = item.stage === 'chopped' || item.stage === 'cooked';
+    return (
+      recipe.components.find(
+        (rc) => rc.needsCook && rc.ingredient === item.ingredient && rc.needsChop === wantChop,
+      ) ??
+      recipe.components.find((rc) => rc.needsCook && rc.ingredient === item.ingredient) ??
+      null
+    );
+  }
+
+  // When a cooked item burns, whichever prepping chef was awaiting it is freed by
+  // abandonTask elsewhere; here we revert an open order's component that this item
+  // was destined for (its prepper died / it orphaned) back to 'todo'.
+  private revertComponentForStoveItem(item: Item) {
+    for (const o of this.state.orders) {
+      if (o.status !== 'open') continue;
+      for (let i = 0; i < o.components.length; i++) {
+        const comp = o.components[i];
+        if (comp.status !== 'prepping') continue;
+        if (comp.ingredient !== item.ingredient) continue;
+        const rc = RECIPES[o.dish].components[i];
+        if (!rc.needsCook) continue;
+        // is the chef prepping this component actually still awaiting a stove?
+        const prepper = comp.by !== null ? this.rt[comp.by] : null;
+        const stillLive = prepper && prepper.prep && prepper.prep.orderId === o.id && prepper.prep.compIdx === i;
+        if (!stillLive) {
+          comp.status = 'todo';
+          comp.by = null;
+          return;
+        }
+      }
+    }
   }
 
   // ── chef stepping ──────────────────────────────────────────
@@ -331,7 +401,6 @@ export class KitchenSim {
 
     if (r.steps.length === 0) {
       // no steps queued → idle, and (throttled) ask the brain what to do next.
-      // celebrating is played out inside a work step, so it never lands here.
       c.action = 'idle';
       c.inputDir = { x: 0, y: 0 };
       if (c.inputBtn === 'A') c.inputBtn = null;
@@ -345,6 +414,8 @@ export class KitchenSim {
       this.doWalk(r, step, dt, now);
     } else if (step.kind === 'work') {
       this.doWork(r, step, dt, now);
+    } else if (step.kind === 'awaitCook') {
+      this.doAwaitCook(r, step, dt, now);
     } else {
       // instant
       step.run(this, r);
@@ -458,13 +529,67 @@ export class KitchenSim {
     }
   }
 
+  // Wait ADJACENT to a stove for its item to finish cooking, then continue the
+  // prep chain. Standing next to a cooking stove counts as making progress (the
+  // chef is committed work, not deadlocked). If the item burns / vanishes /
+  // catches fire the chain bails and the chef re-decides.
+  private doAwaitCook(r: ChefRt, step: Extract<Step, { kind: 'awaitCook' }>, dt: number, now: number) {
+    const c = r.chef;
+    const s = this.state.stations.find((st) => st.id === step.stationId);
+    if (!s) { this.abandonTask(r, false); return; }
+
+    // stay adjacent while it cooks
+    if (!this.adjacentTo(c, s)) {
+      const stand = this.nearestStand(c, s);
+      if (!stand) { this.abandonTask(r, false); return; }
+      r.steps.unshift({ kind: 'walkTo', stand, label: step.label });
+      return;
+    }
+
+    // our item gone / burnt / stove on fire → the cooked good is lost; bail so we
+    // re-decide (the component was reverted or will be rescued elsewhere).
+    if (s.onFire || !s.item || s.item.stage === 'burnt') {
+      // free the component so it can be re-prepped
+      if (r.prep) {
+        const o = this.orderById(r.prep.orderId);
+        if (o && o.status === 'open') {
+          const comp = o.components[r.prep.compIdx];
+          if (comp && comp.status === 'prepping' && comp.by === c.id) {
+            comp.status = 'todo';
+            comp.by = null;
+          }
+        }
+      }
+      this.abandonTask(r, false);
+      return;
+    }
+
+    // "watching the pot" — a committed, in-progress state (NOT idle) so the HUD
+    // and harness both read it as active work while the cook runs unattended.
+    c.action = 'stirring';
+    c.inputDir = { x: 0, y: 0 };
+    c.inputBtn = null;
+    c.moveLabel = step.label;
+    c.actionProgress = Math.min(1, s.progress);
+    c.facing = { x: Math.sign(s.x - c.x) || c.facing.x, y: Math.sign(s.y - c.y) || c.facing.y };
+    this.applyUrgencyFlavor(r, now);
+
+    if (s.item.stage === 'cooked') {
+      // collect it and continue
+      const done = step.onDone;
+      r.steps.shift();
+      done(this, r);
+    }
+    void dt;
+  }
+
   private applyUrgencyFlavor(r: ChefRt, now: number) {
     const c = r.chef;
     // near a fire?
     const nearFire = this.state.stations.some(
       (s) => s.onFire && Math.abs(s.x - c.x) <= 1.6 && Math.abs(s.y - c.y) <= 1.6,
     );
-    const order = this.claimedOrder(c.id);
+    const order = this.workingOrder(c.id);
     const timePressure = order ? order.expiresAt - now : Infinity;
     if ((nearFire || timePressure < 8) && (c.action === 'walking' || c.action === 'idle')) {
       if (c.action === 'walking') c.action = 'panicking';
@@ -477,12 +602,9 @@ export class KitchenSim {
     if (r.telemetry.inFlight) return;
     if (now - r.lastDecisionAt < DECISION_MIN_GAP) return;
 
-    // If we're mid-order but out of steps and idle too long, force a re-decide.
     if (r.idleSince === 0) r.idleSince = now;
 
     const options = this.buildOptions(r);
-    // deadlock guard: if the only option is wait and we've idled a while, still
-    // ask (the brain returns wait), but keep the loop alive by resetting timer.
     const req = this.buildRequest(r, now, options);
     r.lastDecisionAt = now;
     r.telemetry.inFlight = true;
@@ -521,116 +643,68 @@ export class KitchenSim {
     tel.totalCostUsd += d.costUsd;
   }
 
-  // Build the set of currently-valid high-level options for this chef.
+  // ── option builder (the task market) ───────────────────────
+  // A chef is "free" for new prep/assemble work when not carrying and has no
+  // steps queued (the option builder only runs when steps are empty, so the
+  // latter is implied). Extinguish/rescue/trash are the carrying-aware valves.
   private buildOptions(r: ChefRt): ActionOption[] {
     const c = r.chef;
     const opts: ActionOption[] = [];
     const carrying = c.carrying;
 
-    // extinguish takes priority when fires exist — but exactly one chef is
-    // assigned per fire so all four don't stampede the same stove.
+    // extinguish takes priority when fires exist — exactly one chef is assigned
+    // per fire so all four don't stampede the same stove.
     for (const s of this.state.stations) {
       if (!s.onFire) continue;
       const assigned = this.fireAssign.get(s.id);
       if (assigned === c.id) {
         opts.push({ id: `extinguish:${s.id}`, label: 'Extinguish!' });
-      } else if (assigned === undefined && !c.carrying) {
-        // offer to the nearest currently-unassigned chef only
+      } else if (assigned === undefined && !carrying) {
         if (this.nearestFreeChefFor(s) === c.id) {
           opts.push({ id: `extinguish:${s.id}`, label: 'Extinguish!' });
         }
       }
     }
 
-    if (carrying && carrying.stage === 'burnt') {
-      const trash = this.station(T.TRASH);
-      if (trash) opts.push({ id: 'trash', label: 'Trash' });
+    // carrying something? the only sensible moves are trash (burnt/orphan). All
+    // useful carrying is transient inside a prep chain and never lands here.
+    if (carrying) {
+      if (this.station(T.TRASH)) opts.push({ id: 'trash', label: 'Trash' });
+      opts.push({ id: 'wait', label: 'Hold' });
+      return opts;
     }
 
-    let order = this.claimedOrder(c.id);
-
-    if (carrying && carrying.stage === 'plated') {
-      opts.push({ id: 'deliver', label: 'Deliver' });
-    }
-
-    // If we're carrying a workable item but lost our order (it expired), try to
-    // adopt an open order this item can still fulfill so the work isn't wasted.
-    if (!order && carrying && carrying.stage !== 'plated' && carrying.stage !== 'burnt') {
-      order = this.adoptableOrderFor(carrying, c.id);
-    }
-
-    if (order && carrying && carrying.stage !== 'burnt' && carrying.stage !== 'plated') {
-      const recipe = RECIPES[order.dish];
-      const compatible = recipe.ingredient === carrying.ingredient;
-      const complete = compatible && this.itemComplete(carrying, recipe);
-      if (complete) {
-        opts.push({ id: 'plate', label: 'Plate' });
-      } else if (compatible) {
-        // needs chop?
-        if (recipe.needsChop && carrying.stage === 'raw') {
-          for (const b of this.freeStations(T.BOARD)) {
-            opts.push({ id: `chop:${b.id}`, label: `Chop @ ${this.stationLabel(b)}` });
-          }
-        }
-        // needs cook?
-        const cookStage = carrying.stage === (recipe.needsChop ? 'chopped' : 'raw');
-        if (recipe.needsCook && cookStage) {
-          for (const st of this.freeStations(T.STOVE)) {
-            if (st.onFire) continue;
-            opts.push({ id: `cook:${st.id}`, label: `Cook @ ${this.stoveLabel(st)}` });
-          }
-        }
+    // rescue: a cooked item on a stove no open order still needs (orphaned, or
+    // its prepper died). Free chef collects and either re-homes or trashes it —
+    // the burn-prevention valve.
+    for (const s of this.state.stations) {
+      if (s.kind !== T.STOVE || s.onFire) continue;
+      const item = s.item;
+      if (!item || item.stage !== 'cooked') continue;
+      if (this.stoveItemIsOrphan(s, item)) {
+        opts.push({ id: `rescue:${s.id}`, label: `Rescue Stove ${this.stoveLabel(s)}` });
       }
     }
 
-    // Carrying a non-burnt item we can't do anything useful with (no matching
-    // order to make or adopt) → trashing it frees our hands. Always offer it as
-    // an escape hatch so a chef never deadlocks holding orphaned food.
-    if (carrying && carrying.stage !== 'burnt' && carrying.stage !== 'plated') {
-      const canUse = opts.some(
-        (o) => o.id === 'plate' || o.id.startsWith('chop:') || o.id.startsWith('cook:'),
-      );
-      if (!canUse) {
-        const trash = this.station(T.TRASH);
-        if (trash) opts.push({ id: 'trash', label: 'Trash' });
+    // assemble: all components ready and nobody assembling yet.
+    for (const o of this.state.orders) {
+      if (o.status !== 'open') continue;
+      if (o.assemblerId !== null) continue;
+      if (o.components.every((comp) => comp.status === 'ready')) {
+        opts.push({ id: `assemble:${o.id}`, label: `Serve ${RECIPES[o.dish].name} #${o.id}` });
       }
     }
 
-    // Collect a cooked item from a stove if we're empty-handed and it can serve
-    // an open order — ours, or one we could adopt. Rescuing orphaned cooked food
-    // before it burns is what keeps stoves from catching fire.
-    if (!carrying) {
-      for (const st of this.state.stations) {
-        if (st.kind !== T.STOVE || st.onFire) continue;
-        const item = st.item;
-        if (!item || item.stage !== 'cooked') continue;
-        const forMine = order && RECIPES[order.dish].ingredient === item.ingredient;
-        const adoptable = !order && this.adoptableOrderFor(item, c.id) !== null;
-        if (forMine || adoptable) {
-          opts.push({ id: `collect:${st.id}`, label: `Collect @ ${this.stoveLabel(st)}` });
-        }
-      }
-    }
-
-    // fetch raw ingredient for the claimed order
-    if (order && !carrying) {
-      const recipe = RECIPES[order.dish];
-      // only fetch if there's no cooked item already waiting to collect
-      const hasCollectable = opts.some((o) => o.id.startsWith('collect:'));
-      if (!hasCollectable) {
-        const crate = this.crateFor(recipe.ingredient);
-        if (crate) opts.push({ id: `fetch:${recipe.ingredient}`, label: `Fetch ${cap(recipe.ingredient)}` });
-      }
-    }
-
-    // if no claimed order and hands free, claim an open unclaimed order
-    if (!order && (!carrying || carrying.stage === 'burnt')) {
-      if (!carrying) {
-        for (const o of this.state.orders) {
-          if (o.status === 'open' && o.claimedBy === null) {
-            opts.push({ id: `claim:${o.id}`, label: `Claim ${RECIPES[o.dish].name} #${o.id}` });
-          }
-        }
+    // prep: every 'todo' component of every open order is up for grabs.
+    for (const o of this.state.orders) {
+      if (o.status !== 'open') continue;
+      for (let i = 0; i < o.components.length; i++) {
+        const comp = o.components[i];
+        if (comp.status !== 'todo') continue;
+        opts.push({
+          id: `prep:${o.id}:${i}`,
+          label: `${comp.label} · ${RECIPES[o.dish].name} #${o.id}`,
+        });
       }
     }
 
@@ -638,13 +712,37 @@ export class KitchenSim {
     return opts;
   }
 
+  // A cooked stove item is an orphan if no OPEN order has a 'prepping' component
+  // (of the right ingredient + cook path) whose prepper is still live and
+  // awaiting it. Anything cooked with nobody coming for it is a rescue target.
+  private stoveItemIsOrphan(s: Station, item: Item): boolean {
+    for (const o of this.state.orders) {
+      if (o.status !== 'open') continue;
+      for (let i = 0; i < o.components.length; i++) {
+        const comp = o.components[i];
+        if (comp.status !== 'prepping') continue;
+        if (comp.ingredient !== item.ingredient) continue;
+        const rc = RECIPES[o.dish].components[i];
+        if (!rc.needsCook) continue;
+        const prepper = comp.by !== null ? this.rt[comp.by] : null;
+        if (!prepper) continue;
+        // is the prepper live and awaiting THIS stove?
+        const awaiting = prepper.prep &&
+          prepper.prep.orderId === o.id &&
+          prepper.prep.compIdx === i &&
+          prepper.steps.some((st) => st.kind === 'awaitCook' && st.stationId === s.id);
+        if (awaiting) return false;
+      }
+    }
+    return true;
+  }
+
   private buildRequest(r: ChefRt, now: number, options: ActionOption[]): DecisionRequest {
     const c = r.chef;
-    const order = this.claimedOrder(c.id);
+    const order = this.workingOrder(c.id);
     const distances: Record<string, number> = {};
-    for (const o of options) {
-      distances[o.id] = this.optionDistance(c, o.id);
-    }
+    for (const o of options) distances[o.id] = this.optionDistance(c, o.id);
+
     const state: Record<string, unknown> = {
       orders: this.state.orders
         .filter((o) => o.status === 'open')
@@ -654,23 +752,23 @@ export class KitchenSim {
           dish: o.dish,
           points: RECIPES[o.dish].points,
           secondsLeft: Math.max(0, Math.round(o.expiresAt - now)),
-          claimedBy: o.claimedBy,
+          components: o.components.map((comp) => ({ label: comp.label, status: comp.status })),
+          assemblyReady: o.components.filter((comp) => comp.status === 'ready').length,
+          totalComponents: o.components.length,
         })),
       carrying: c.carrying ? { ingredient: c.carrying.ingredient, stage: c.carrying.stage } : null,
-      claimedOrderId: order?.id ?? null,
-      claimedSecondsLeft: order ? Math.max(0, Math.round(order.expiresAt - now)) : null,
+      workingOrderId: order?.id ?? null,
+      workingSecondsLeft: order ? Math.max(0, Math.round(order.expiresAt - now)) : null,
       fireCount: this.state.stations.filter((s) => s.onFire).length,
       pos: { x: Math.round(c.x * 10) / 10, y: Math.round(c.y * 10) / 10 },
       distances,
       stations: this.stationSummary(),
-      // What the other three chefs are doing, so a deterministic brain can
-      // differentiate identical-looking situations and avoid claim pileups.
       teammates: this.rt
         .filter((o) => o.chef.id !== c.id)
         .map((o) => ({
           chef: o.chef.id,
           plan: o.chef.planLabel,
-          claimedOrderId: this.claimedOrder(o.chef.id)?.id ?? null,
+          workingOrderId: o.chef.workingOrderId,
           deciding: o.telemetry.inFlight,
         })),
     };
@@ -690,8 +788,6 @@ export class KitchenSim {
 
   private applyDecision(r: ChefRt, d: JevDecision, options: ActionOption[]): boolean {
     const valid = options.find((o) => o.id === d.chosenId);
-    // if the chosen action is no longer valid (state moved on), skip; the loop
-    // will re-request next tick.
     if (!valid) return false;
     this.compile(r, d.chosenId);
     return true;
@@ -707,154 +803,23 @@ export class KitchenSim {
       return;
     }
 
-    if (id.startsWith('claim:')) {
-      const oid = Number(id.slice(6));
-      const order = this.state.orders.find((o) => o.id === oid);
-      if (!order || order.status !== 'open' || order.claimedBy !== null) return;
-      order.claimedBy = c.id;
-      c.planLabel = `${RECIPES[order.dish].name} #${order.id}`;
-      c.moveLabel = 'Claimed';
-      // immediately continue: next decision (fetch) happens next idle tick
-      return;
-    }
-
     if (id.startsWith('extinguish:')) {
-      const sid = Number(id.slice('extinguish:'.length));
-      const s = this.state.stations.find((st) => st.id === sid);
-      if (!s || !s.onFire) return;
-      const assigned = this.fireAssign.get(sid);
-      if (assigned !== undefined && assigned !== c.id) return; // someone else has it
-      this.fireAssign.set(sid, c.id);
-      this.walkThen(r, s, {
-        action: 'extinguishing', duration: 2.5, label: `Extinguish ${this.stoveLabel(s)}`,
-        onDone: (sim, rr) => {
-          s.onFire = false;
-          s.fireHp = 0;
-          sim.fireAssign.delete(sid);
-          sim.pushEvent('info', `${rr.chef.name} put out Stove ${sim.stoveLabel(s)}`);
-        },
-      });
-      c.planLabel = 'FIRE! Extinguishing';
+      this.compileExtinguish(r, id);
       return;
     }
 
-    if (id.startsWith('fetch:')) {
-      const ing = id.slice(6) as Ingredient;
-      const crate = this.crateFor(ing);
-      if (!crate) return;
-      this.walkThen(r, crate, {
-        action: 'grabbing', duration: 0.4, label: `Grab ${cap(ing)}`,
-        onDone: (_sim, rr) => {
-          rr.chef.carrying = { ingredient: ing, stage: 'raw' };
-          this.pressB(rr);
-        },
-      });
-      const order = this.claimedOrder(c.id);
-      c.planLabel = order ? `${RECIPES[order.dish].name} · fetch ${ing}` : `Fetch ${ing}`;
+    if (id.startsWith('rescue:')) {
+      this.compileRescue(r, id);
       return;
     }
 
-    if (id.startsWith('chop:')) {
-      const sid = Number(id.slice(5));
-      const s = this.state.stations.find((st) => st.id === sid);
-      if (!s || s.kind !== T.BOARD || s.inUseBy !== null || s.item !== null) return;
-      const carried = c.carrying;
-      if (!carried || carried.stage !== 'raw') return;
-      this.ensureClaimForCarry(c);
-      // place then chop
-      this.walkThen(r, s, {
-        action: 'chopping', duration: RECIPES[this.dishForItem(carried)]?.chopTime ?? 2.4,
-        label: 'Chop',
-        onDone: (sim, rr) => {
-          if (rr.chef.carrying) rr.chef.carrying.stage = 'chopped';
-          s.item = null;
-          s.inUseBy = null;
-          this.pressB(rr);
-          void sim;
-        },
-      }, /*placeItemOnStation*/ true);
-      const order = this.claimedOrder(c.id);
-      c.planLabel = order ? `${RECIPES[order.dish].name} · chop` : 'Chop';
+    if (id.startsWith('assemble:')) {
+      this.compileAssemble(r, id);
       return;
     }
 
-    if (id.startsWith('cook:')) {
-      const sid = Number(id.slice(5));
-      const s = this.state.stations.find((st) => st.id === sid);
-      if (!s || s.kind !== T.STOVE || s.onFire || s.inUseBy !== null || s.item !== null) return;
-      const carried = c.carrying;
-      if (!carried) return;
-      this.ensureClaimForCarry(c);
-      this.walkThen(r, s, {
-        action: 'stirring', duration: 0.4, label: `Cook @ ${this.stoveLabel(s)}`,
-        onDone: (_sim, rr) => {
-          // hand the item to the stove; cooking proceeds unattended
-          if (rr.chef.carrying) {
-            s.item = rr.chef.carrying;
-            s.progress = 0;
-            rr.chef.carrying = null;
-          }
-          this.pressB(rr);
-        },
-      });
-      const order = this.claimedOrder(c.id);
-      c.planLabel = order ? `${RECIPES[order.dish].name} · cook` : 'Cook';
-      return;
-    }
-
-    if (id.startsWith('collect:')) {
-      const sid = Number(id.slice('collect:'.length));
-      const s = this.state.stations.find((st) => st.id === sid);
-      if (!s || !s.item || s.item.stage !== 'cooked') return;
-      this.walkThen(r, s, {
-        action: 'grabbing', duration: 0.4, label: `Collect @ ${this.stoveLabel(s)}`,
-        onDone: (sim, rr) => {
-          if (s.item) {
-            rr.chef.carrying = s.item;
-            s.item = null;
-            s.progress = 0;
-          }
-          sim.ensureClaimForCarry(rr.chef);
-          this.pressB(rr);
-        },
-      });
-      c.planLabel = 'Collect dish';
-      return;
-    }
-
-    if (id === 'plate') {
-      const plates = this.station(T.PLATES);
-      if (!plates) return;
-      this.ensureClaimForCarry(c);
-      const order = this.claimedOrder(c.id);
-      this.walkThen(r, plates, {
-        action: 'plating', duration: 1.0, label: 'Plate',
-        onDone: (_sim, rr) => {
-          if (rr.chef.carrying) {
-            rr.chef.carrying = {
-              ingredient: rr.chef.carrying.ingredient,
-              stage: 'plated',
-              dish: order?.dish,
-            };
-          }
-          this.pressB(rr);
-        },
-      });
-      c.planLabel = order ? `${RECIPES[order.dish].name} · plate` : 'Plate';
-      return;
-    }
-
-    if (id === 'deliver') {
-      const serve = this.station(T.SERVE);
-      if (!serve) return;
-      this.walkThen(r, serve, {
-        action: 'delivering', duration: 0.6, label: 'Deliver',
-        onDone: (sim, rr) => {
-          sim.deliverAt(rr);
-        },
-      });
-      const order = this.claimedOrder(c.id);
-      c.planLabel = order ? `${RECIPES[order.dish].name} · deliver` : 'Deliver';
+    if (id.startsWith('prep:')) {
+      this.compilePrep(r, id);
       return;
     }
 
@@ -868,12 +833,332 @@ export class KitchenSim {
           this.pressB(rr);
         },
       });
-      c.planLabel = 'Dump burnt food';
+      c.planLabel = 'Dump food';
       return;
     }
   }
 
-  // helper: build [walkTo stand, work] steps for a station action.
+  private compileExtinguish(r: ChefRt, id: string) {
+    const c = r.chef;
+    const sid = Number(id.slice('extinguish:'.length));
+    const s = this.state.stations.find((st) => st.id === sid);
+    if (!s || !s.onFire) return;
+    const assigned = this.fireAssign.get(sid);
+    if (assigned !== undefined && assigned !== c.id) return;
+    this.fireAssign.set(sid, c.id);
+    this.walkThen(r, s, {
+      action: 'extinguishing', duration: 2.5, label: `Extinguish ${this.stoveLabel(s)}`,
+      onDone: (sim, rr) => {
+        s.onFire = false;
+        s.fireHp = 0;
+        sim.fireAssign.delete(sid);
+        sim.pushEvent('info', `${rr.chef.name} put out Stove ${sim.stoveLabel(s)}`);
+      },
+    });
+    c.planLabel = 'FIRE! Extinguishing';
+  }
+
+  private compileRescue(r: ChefRt, id: string) {
+    const c = r.chef;
+    const sid = Number(id.slice('rescue:'.length));
+    const s = this.state.stations.find((st) => st.id === sid);
+    if (!s || s.onFire || !s.item || s.item.stage !== 'cooked') return;
+    this.walkThen(r, s, {
+      action: 'grabbing', duration: 0.4, label: `Rescue Stove ${this.stoveLabel(s)}`,
+      onDone: (sim, rr) => {
+        const item = s.item;
+        s.item = null;
+        s.progress = 0;
+        if (!item) return;
+        // try to re-home into a matching 'todo' cook component of an open order.
+        const homed = sim.rehomeCookedItem(rr, item);
+        if (homed) {
+          sim.pressB(rr);
+          return;
+        }
+        // otherwise carry to trash
+        rr.chef.carrying = item;
+        sim.pressB(rr);
+        const trash = sim.station(T.TRASH);
+        if (trash) {
+          sim.walkThen(rr, trash, {
+            action: 'grabbing', duration: 0.5, label: 'Trash rescued',
+            onDone: (_s2, r2) => { r2.chef.carrying = null; sim.pressB(r2); },
+          });
+        } else {
+          rr.chef.carrying = null;
+        }
+      },
+    });
+    c.planLabel = 'Rescue stove';
+  }
+
+  // Deposit a rescued cooked item directly into an order that needs it (same
+  // ingredient + needsCook, currently 'todo'), marking that component ready and
+  // depositing at the order's assembly station. Returns true if re-homed.
+  private rehomeCookedItem(r: ChefRt, item: Item): boolean {
+    for (const o of this.state.orders) {
+      if (o.status !== 'open') continue;
+      for (let i = 0; i < o.components.length; i++) {
+        const comp = o.components[i];
+        if (comp.status !== 'todo') continue;
+        if (comp.ingredient !== item.ingredient) continue;
+        const rc = RECIPES[o.dish].components[i];
+        if (!rc.needsCook) continue;
+        // matching chop requirement (a chopped-then-cooked patty vs plain steak)
+        const wasChopped = item.stage === 'cooked'; // stage collapses; accept either
+        void wasChopped;
+        const stationId = this.ensureAssemblyStation(o);
+        comp.status = 'ready';
+        comp.by = r.chef.id;
+        void stationId;
+        this.pushEvent('info', `Rescued ${comp.label} for ${RECIPES[o.dish].name} #${o.id}`);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private compileAssemble(r: ChefRt, id: string) {
+    const c = r.chef;
+    const oid = Number(id.slice('assemble:'.length));
+    const o = this.orderById(oid);
+    if (!o || o.status !== 'open' || o.assemblerId !== null) return;
+    if (!o.components.every((comp) => comp.status === 'ready')) return;
+    const stationId = this.ensureAssemblyStation(o);
+    const plates = this.state.stations.find((st) => st.id === stationId);
+    if (!plates) return;
+    o.assemblerId = c.id;
+    c.workingOrderId = o.id;
+    const firstIng = o.components[0]?.ingredient ?? 'tomato';
+    this.walkThen(r, plates, {
+      action: 'plating', duration: RECIPES[o.dish].assembleTime, label: `Assemble ${RECIPES[o.dish].name}`,
+      onDone: (sim, rr) => {
+        rr.chef.carrying = { ingredient: firstIng, stage: 'plated', dish: o.dish };
+        sim.pressB(rr);
+        // clear the assembly entry — parts have been picked up onto the plate
+        o.assemblyStationId = null;
+        const serve = sim.station(T.SERVE);
+        if (!serve) return;
+        sim.walkThen(rr, serve, {
+          action: 'delivering', duration: 0.6, label: `Deliver ${RECIPES[o.dish].name}`,
+          onDone: (s2, r2) => { s2.serveOrder(r2, o); },
+        });
+      },
+    });
+    c.planLabel = `${RECIPES[o.dish].name} #${o.id} · assemble`;
+  }
+
+  private serveOrder(r: ChefRt, o: Order) {
+    const c = r.chef;
+    c.carrying = null;
+    if (o.status !== 'open') {
+      // order died mid-delivery; nothing to bank
+      c.workingOrderId = null;
+      return;
+    }
+    o.status = 'done';
+    const pts = RECIPES[o.dish].points;
+    this.state.score += pts;
+    this.state.served++;
+    c.dishesServed++;
+    c.workingOrderId = null;
+    o.assemblerId = null;
+    o.assemblyStationId = null;
+    this.pushEvent('serve', `${c.name} served ${RECIPES[o.dish].name} (+${pts})`);
+    // celebrate
+    r.steps = [{
+      kind: 'work',
+      stationId: this.station(T.SERVE)!.id,
+      action: 'celebrating',
+      duration: 1.2,
+      label: 'Nice!',
+      onDone: () => {},
+    }];
+    r.stepTime = 0;
+    c.planLabel = 'Served!';
+  }
+
+  // ── prep chain: fetch → [chop] → [cook + await + collect] → deposit ────
+  private compilePrep(r: ChefRt, id: string) {
+    const c = r.chef;
+    const [, oidStr, idxStr] = id.split(':');
+    const oid = Number(oidStr);
+    const compIdx = Number(idxStr);
+    const o = this.orderById(oid);
+    if (!o || o.status !== 'open') return;
+    const comp = o.components[compIdx];
+    if (!comp || comp.status !== 'todo') return;
+    const rc = RECIPES[o.dish].components[compIdx];
+
+    comp.status = 'prepping';
+    comp.by = c.id;
+    c.workingOrderId = o.id;
+    r.prep = { orderId: oid, compIdx };
+    c.planLabel = `${comp.label} · ${RECIPES[o.dish].name} #${o.id}`;
+
+    const crate = this.crateFor(rc.ingredient);
+    if (!crate) { this.abandonTask(r, false); return; }
+
+    // Step 1: fetch raw ingredient.
+    this.walkThen(r, crate, {
+      action: 'grabbing', duration: 0.4, label: `Grab ${cap(rc.ingredient)}`,
+      onDone: (sim, rr) => {
+        rr.chef.carrying = { ingredient: rc.ingredient, stage: 'raw' };
+        sim.pressB(rr);
+        sim.prepAfterFetch(rr, oid, compIdx);
+      },
+    });
+  }
+
+  // After fetching raw: chop if needed, else move to cook/deposit.
+  private prepAfterFetch(r: ChefRt, oid: number, compIdx: number) {
+    const o = this.orderById(oid);
+    if (!o || o.status !== 'open') { this.abandonTask(r, false); return; }
+    const rc = RECIPES[o.dish].components[compIdx];
+
+    if (rc.needsChop) {
+      const board = this.freeStations(T.BOARD)[0];
+      if (!board) {
+        // all boards busy — briefly wait then re-decide (never deadlock). Drop
+        // the raw item back conceptually by trashing; simplest robust recovery:
+        // hold the chain, retry next idle by clearing steps (chef re-decides,
+        // component stays 'prepping' with this chef still assigned).
+        this.retryPrepSoon(r);
+        return;
+      }
+      this.walkThen(r, board, {
+        action: 'chopping', duration: rc.chopTime, label: `Chop ${cap(rc.ingredient)}`,
+        onDone: (sim, rr) => {
+          if (rr.chef.carrying) rr.chef.carrying.stage = 'chopped';
+          board.item = null;
+          board.inUseBy = null;
+          sim.pressB(rr);
+          sim.prepAfterChop(rr, oid, compIdx);
+        },
+      }, /*placeItemOnStation*/ true);
+    } else {
+      this.prepAfterChop(r, oid, compIdx);
+    }
+  }
+
+  // After chop (or if no chop): cook if needed, else deposit directly.
+  private prepAfterChop(r: ChefRt, oid: number, compIdx: number) {
+    const o = this.orderById(oid);
+    if (!o || o.status !== 'open') { this.abandonTask(r, false); return; }
+    const rc = RECIPES[o.dish].components[compIdx];
+
+    if (rc.needsCook) {
+      const stove = this.freeStations(T.STOVE).find((s) => !s.onFire);
+      if (!stove) { this.retryPrepSoon(r); return; }
+      this.walkThen(r, stove, {
+        action: 'stirring', duration: 0.4, label: `Cook @ Stove ${this.stoveLabel(stove)}`,
+        onDone: (sim, rr) => {
+          if (rr.chef.carrying) {
+            stove.item = rr.chef.carrying;
+            stove.progress = 0;
+            rr.chef.carrying = null;
+          }
+          sim.pressB(rr);
+          // keep the chain alive: wait adjacent until cooked, then collect.
+          rr.steps.push({
+            kind: 'awaitCook', stationId: stove.id, label: `Await ${cap(rc.ingredient)}`,
+            onDone: (s2, r2) => {
+              const item = stove.item;
+              if (item && item.stage === 'cooked') {
+                r2.chef.carrying = item;
+                stove.item = null;
+                stove.progress = 0;
+                s2.pressB(r2);
+                s2.prepDeposit(r2, oid, compIdx);
+              } else {
+                s2.abandonTask(r2, false);
+              }
+            },
+          });
+        },
+      });
+    } else {
+      this.prepDeposit(r, oid, compIdx);
+    }
+  }
+
+  // Final step of a prep chain: carry the finished component to the order's
+  // assembly station and deposit it → component 'ready', chef freed.
+  private prepDeposit(r: ChefRt, oid: number, compIdx: number) {
+    const c = r.chef;
+    const o = this.orderById(oid);
+    if (!o || o.status !== 'open') { this.abandonTask(r, false); return; }
+    const comp = o.components[compIdx];
+    if (!comp || comp.status !== 'prepping' || comp.by !== c.id) {
+      // component was reverted/taken — drop what we carry and re-decide
+      this.abandonTask(r, false);
+      return;
+    }
+    const stationId = this.ensureAssemblyStation(o);
+    const plates = this.state.stations.find((s) => s.id === stationId);
+    if (!plates) { this.abandonTask(r, false); return; }
+
+    this.walkThen(r, plates, {
+      action: 'plating', duration: 0.5, label: `Deposit ${comp.label}`,
+      onDone: (sim, rr) => {
+        rr.chef.carrying = null;
+        comp.status = 'ready';
+        comp.by = rr.chef.id;
+        rr.chef.workingOrderId = null;
+        rr.prep = null;
+        sim.pressB(rr);
+        // sparse milestone event (cap noise: only for multi-component dishes)
+        if (o.components.length > 1) {
+          sim.pushEvent('info', `${comp.label} ready for ${RECIPES[o.dish].name} #${o.id}`);
+        }
+        rr.chef.planLabel = `${comp.label} ready`;
+      },
+    });
+  }
+
+  // Board/stove all busy: pause the chain briefly and let the chef re-decide.
+  // The component stays 'prepping' with this chef assigned. We clear steps and
+  // trash any raw carry so the chef's hands are free to re-decide; the component
+  // is reverted to 'todo' so anyone (incl. this chef) can pick it up again.
+  private retryPrepSoon(r: ChefRt) {
+    const c = r.chef;
+    if (r.prep) {
+      const o = this.orderById(r.prep.orderId);
+      if (o && o.status === 'open') {
+        const comp = o.components[r.prep.compIdx];
+        if (comp && comp.status === 'prepping' && comp.by === c.id) {
+          comp.status = 'todo';
+          comp.by = null;
+        }
+      }
+    }
+    r.prep = null;
+    c.workingOrderId = null;
+    // discard any raw/in-progress carry so we don't strand an item
+    if (c.carrying && c.carrying.stage !== 'plated') c.carrying = null;
+    r.steps = [];
+    r.stepTime = 0;
+    c.path = [];
+    c.action = 'idle';
+    c.planLabel = 'Stations busy — regrouping';
+    // small artificial delay before re-deciding so we don't spin hot
+    r.lastDecisionAt = this.state.t + 0.6 - DECISION_MIN_GAP;
+    r.idleSince = 0;
+  }
+
+  // Assign (or reuse) a PLATES station for an order, round-robin over the two.
+  private ensureAssemblyStation(o: Order): number {
+    if (o.assemblyStationId !== null) return o.assemblyStationId;
+    const plates = this.state.stations.filter((s) => s.kind === T.PLATES);
+    if (plates.length === 0) return -1;
+    const chosen = plates[this.assemblyRR % plates.length];
+    this.assemblyRR++;
+    o.assemblyStationId = chosen.id;
+    return chosen.id;
+  }
+
+  // ── build [walkTo, work] steps for a station action ────────
   private walkThen(
     r: ChefRt,
     s: Station,
@@ -889,7 +1174,6 @@ export class KitchenSim {
     r.steps = [];
     r.steps.push({ kind: 'walkTo', stand, label: `→ ${work.label}` });
     if (placeItemOnStation) {
-      // put the raw item onto the board when we arrive (chop path)
       r.steps.push({
         kind: 'instant', label: 'place',
         run: (_sim, rr) => {
@@ -908,41 +1192,6 @@ export class KitchenSim {
     r.stepTime = 0;
   }
 
-  private deliverAt(r: ChefRt) {
-    const c = r.chef;
-    const plated = c.carrying;
-    if (!plated || plated.stage !== 'plated') { c.carrying = null; return; }
-    const dish = plated.dish;
-    // find a matching open order — prefer this chef's claimed one
-    let order = this.claimedOrder(c.id);
-    if (!order || order.dish !== dish || order.status !== 'open') {
-      order = this.state.orders.find((o) => o.status === 'open' && o.dish === dish) ?? null;
-    }
-    c.carrying = null;
-    if (order) {
-      order.status = 'done';
-      order.claimedBy = c.id;
-      const pts = RECIPES[order.dish].points;
-      this.state.score += pts;
-      this.state.served++;
-      c.dishesServed++;
-      this.pushEvent('serve', `${c.name} served ${RECIPES[order.dish].name} (+${pts})`);
-      // celebrate
-      r.steps = [{
-        kind: 'work',
-        stationId: this.station(T.SERVE)!.id,
-        action: 'celebrating',
-        duration: 1.2,
-        label: 'Nice!',
-        onDone: () => {},
-      }];
-      r.stepTime = 0;
-      c.planLabel = 'Served!';
-    } else {
-      this.pushEvent('info', `${c.name} had no taker for ${dish}`);
-    }
-  }
-
   // ── task abandonment ───────────────────────────────────────
   private abandonTask(r: ChefRt, orderFailed: boolean) {
     const c = r.chef;
@@ -953,17 +1202,50 @@ export class KitchenSim {
     this.fireAssign.forEach((cid, sid) => {
       if (cid === c.id) this.fireAssign.delete(sid);
     });
+    // release our prepping component (if the order still lives & we owned it)
+    if (r.prep) {
+      const o = this.orderById(r.prep.orderId);
+      if (o && o.status === 'open') {
+        const comp = o.components[r.prep.compIdx];
+        if (comp && comp.status === 'prepping' && comp.by === c.id) {
+          comp.status = 'todo';
+          comp.by = null;
+        }
+      }
+    }
+    // release an assembly we owned
+    if (c.workingOrderId !== null) {
+      const o = this.orderById(c.workingOrderId);
+      if (o && o.status === 'open' && o.assemblerId === c.id) o.assemblerId = null;
+    }
+    r.prep = null;
+    c.workingOrderId = null;
     r.steps = [];
     r.stepTime = 0;
     c.path = [];
     c.action = 'idle';
     c.actionProgress = 0;
-    // if carrying a non-plated item and our order died, we'll trash/redeal via
-    // the option builder; leave carrying as-is so 'trash' becomes an option.
-    if (orderFailed) {
-      c.planLabel = 'Order lost — regrouping';
-    }
+    // drop any non-plated carry so it doesn't strand; a burnt/orphan carry will
+    // surface a 'trash' option instead if we keep it, but for a lost order the
+    // clean move is to free hands.
+    if (c.carrying && c.carrying.stage !== 'burnt') c.carrying = null;
+    if (orderFailed) c.planLabel = 'Order lost — regrouping';
     r.idleSince = 0;
+  }
+
+  // ── assemblies view (recomputed each tick) ─────────────────
+  private recomputeAssemblies() {
+    const out: Assembly[] = [];
+    for (const o of this.state.orders) {
+      if (o.status !== 'open') continue;
+      if (o.assemblyStationId === null) continue;
+      const readyItems = o.components
+        .filter((comp) => comp.status === 'ready')
+        .map((comp) => ({ ingredient: comp.ingredient, stage: 'plated' as const }));
+      if (readyItems.length === 0) continue;
+      out.push({ orderId: o.id, dish: o.dish, stationId: o.assemblyStationId, readyItems });
+    }
+    this.state.assemblies = out;
   }
 
   // ── small helpers ──────────────────────────────────────────
@@ -972,34 +1254,15 @@ export class KitchenSim {
     r.bHoldUntil = this.state.t + B_HOLD;
   }
 
-  // If the chef holds a workable item but has no claimed order, adopt (claim) an
-  // open order it can fulfill so plate/cook/chop deliver against a real order.
-  private ensureClaimForCarry(c: Chef) {
-    if (this.claimedOrder(c.id)) return;
-    if (!c.carrying || c.carrying.stage === 'burnt' || c.carrying.stage === 'plated') return;
-    const adopt = this.adoptableOrderFor(c.carrying, c.id);
-    if (adopt) {
-      adopt.claimedBy = c.id;
-      c.planLabel = `${RECIPES[adopt.dish].name} #${adopt.id}`;
-    }
+  private orderById(id: number): Order | null {
+    return this.state.orders.find((o) => o.id === id) ?? null;
   }
 
-  private claimedOrder(chefId: number): Order | null {
-    return this.state.orders.find(
-      (o) => o.status === 'open' && o.claimedBy === chefId,
-    ) ?? null;
-  }
-
-  private itemComplete(item: Item, recipe: Recipe): boolean {
-    if (recipe.needsCook) return item.stage === 'cooked';
-    if (recipe.needsChop) return item.stage === 'chopped';
-    return item.stage === 'raw';
-  }
-
-  private dishForItem(item: Item): DishId {
-    // best-effort dish for an ingredient (used only for chop duration)
-    const r = Object.values(RECIPES).find((x) => x.ingredient === item.ingredient && x.needsChop);
-    return (r ?? Object.values(RECIPES).find((x) => x.ingredient === item.ingredient))!.id;
+  private workingOrder(chefId: number): Order | null {
+    const id = this.state.chefs[chefId]?.workingOrderId ?? null;
+    if (id === null) return null;
+    const o = this.orderById(id);
+    return o && o.status === 'open' ? o : null;
   }
 
   private freeStations(kind: TileKind): Station[] {
@@ -1012,20 +1275,14 @@ export class KitchenSim {
     return this.state.stations.find((s) => s.kind === kind) ?? null;
   }
 
-  // Pick the closest chef who is free to fight a fire (empty-handed, no order
-  // that's mid-cook, not already assigned to another fire). Deterministic by id
-  // on ties so all chefs agree who takes it.
+  // Pick the closest chef free to fight a fire (empty-handed, not already
+  // assigned to another fire). Deterministic by id on ties.
   private nearestFreeChefFor(s: Station): number {
     let bestId = -1;
     let bestDist = Infinity;
     for (const r of this.rt) {
       const c = r.chef;
       if (c.carrying) continue;
-      // don't yank a chef whose claimed order has food cooking/cooked on a
-      // stove — they need to stay to collect it before it burns.
-      const order = this.claimedOrder(c.id);
-      if (order && this.hasFoodOnStoveFor(c.id, order)) continue;
-      // already assigned to a (different, still-burning) fire?
       let busyElsewhere = false;
       this.fireAssign.forEach((cid, sid) => {
         if (cid === c.id && sid !== s.id) {
@@ -1035,44 +1292,12 @@ export class KitchenSim {
       });
       if (busyElsewhere) continue;
       const d = Math.abs(c.x - s.x) + Math.abs(c.y - s.y);
-      if (d < bestDist - 1e-6 || (Math.abs(d - bestDist) <= 1e-6 && c.id < bestId)) {
+      if (d < bestDist - 1e-6 || (Math.abs(d - bestDist) <= 1e-6 && (bestId < 0 || c.id < bestId))) {
         bestDist = d;
         bestId = c.id;
       }
     }
     return bestId;
-  }
-
-  // An open order the carried item can still fulfill — either already claimed by
-  // this chef, or unclaimed (adoptable). Prefers unclaimed; used to salvage work
-  // when a chef's original order expired mid-prep.
-  private adoptableOrderFor(item: Item, chefId: number): Order | null {
-    let best: Order | null = null;
-    for (const o of this.state.orders) {
-      if (o.status !== 'open') continue;
-      if (o.claimedBy !== null && o.claimedBy !== chefId) continue;
-      const recipe = RECIPES[o.dish];
-      if (recipe.ingredient !== item.ingredient) continue;
-      // item must not have overshot this recipe (e.g. chopped item can't become
-      // an un-chop recipe's raw requirement — but chopped works for cook recipes)
-      if (item.stage === 'chopped' && !recipe.needsChop && !recipe.needsCook) continue;
-      if (!best || o.expiresAt < best.expiresAt) best = o;
-    }
-    return best;
-  }
-
-  // Does this chef have an item on a stove (cooking or cooked) for its order?
-  private hasFoodOnStoveFor(_chefId: number, order: Order): boolean {
-    const recipe = RECIPES[order.dish];
-    if (!recipe.needsCook) return false;
-    return this.state.stations.some(
-      (s) =>
-        s.kind === T.STOVE &&
-        !s.onFire &&
-        s.item !== null &&
-        s.item.ingredient === recipe.ingredient &&
-        (s.item.stage === 'raw' || s.item.stage === 'chopped' || s.item.stage === 'cooked'),
-    );
   }
 
   // Drop assignments whose fire is out or whose chef wandered off.
@@ -1098,7 +1323,11 @@ export class KitchenSim {
   }
 
   private crateFor(ing: Ingredient): Station | null {
-    const kind = ing === 'tomato' ? T.CRATE_TOMATO : ing === 'meat' ? T.CRATE_MEAT : T.CRATE_PASTA;
+    const kind =
+      ing === 'tomato' ? T.CRATE_TOMATO :
+      ing === 'meat' ? T.CRATE_MEAT :
+      ing === 'pasta' ? T.CRATE_PASTA :
+      T.CRATE_BUN;
     return this.station(kind);
   }
 
@@ -1116,15 +1345,26 @@ export class KitchenSim {
 
   private optionDistance(c: Chef, id: string): number {
     let target: Station | null = null;
-    if (id.startsWith('extinguish:') || id.startsWith('chop:') || id.startsWith('cook:') || id.startsWith('collect:')) {
+    if (id.startsWith('extinguish:') || id.startsWith('rescue:')) {
       const sid = Number(id.slice(id.indexOf(':') + 1));
       target = this.state.stations.find((s) => s.id === sid) ?? null;
-    } else if (id.startsWith('fetch:')) {
-      target = this.crateFor(id.slice(6) as Ingredient);
-    } else if (id === 'plate') target = this.station(T.PLATES);
-    else if (id === 'deliver') target = this.station(T.SERVE);
-    else if (id === 'trash') target = this.station(T.TRASH);
-    else if (id.startsWith('claim:')) return 3;
+    } else if (id.startsWith('assemble:')) {
+      const oid = Number(id.slice('assemble:'.length));
+      const o = this.orderById(oid);
+      if (o?.assemblyStationId != null) {
+        target = this.state.stations.find((s) => s.id === o.assemblyStationId) ?? null;
+      } else {
+        target = this.station(T.PLATES);
+      }
+    } else if (id.startsWith('prep:')) {
+      // distance to the crate the component starts at
+      const [, oidStr, idxStr] = id.split(':');
+      const o = this.orderById(Number(oidStr));
+      if (o) {
+        const rc = RECIPES[o.dish].components[Number(idxStr)];
+        if (rc) target = this.crateFor(rc.ingredient);
+      }
+    } else if (id === 'trash') target = this.station(T.TRASH);
     else return 0;
     if (!target) return 6;
     return Math.abs(c.x - target.x) + Math.abs(c.y - target.y);
@@ -1133,15 +1373,6 @@ export class KitchenSim {
   private stoveLabel(s: Station): string {
     const stoves = this.state.stations.filter((x) => x.kind === T.STOVE);
     return String(stoves.indexOf(s) + 1);
-  }
-
-  private stationLabel(s: Station): string {
-    if (s.kind === T.BOARD) {
-      const boards = this.state.stations.filter((x) => x.kind === T.BOARD);
-      return `Board ${boards.indexOf(s) + 1}`;
-    }
-    if (s.kind === T.STOVE) return `Stove ${this.stoveLabel(s)}`;
-    return 'Station';
   }
 
   private pushEvent(kind: SimEvent['kind'], text: string) {

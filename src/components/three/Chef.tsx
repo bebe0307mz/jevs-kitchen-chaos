@@ -12,6 +12,7 @@ import { Text, Billboard } from '@react-three/drei';
 import type { SimState, Chef as ChefT, ChefAction } from '@/game/types';
 import { COL, GEO, mat, tileToWorld } from './palette';
 import { ParticlePool, type PoolHandle } from './Particles';
+import { buildComposedDish } from './FoodBits';
 import type { Item } from '@/game/types';
 
 const BODY_Y = 0.34;      // body centre height above floor
@@ -420,10 +421,15 @@ function buildItemObject(item: Item): THREE.Group {
     m.castShadow = true;
     g.add(m);
   };
-  if (item.stage === 'plated') {
+  if (item.stage === 'plated' && item.dish) {
+    // composed dish (burger stack / soup bowl / steak / pasta nest / salad)
+    const dish = buildComposedDish(item.dish);
+    dish.scale.setScalar(0.9);
+    g.add(dish);
+  } else if (item.stage === 'plated') {
+    // plated but no dish id yet — generic plate + blob fallback
     add(GEO.cyl, COL.plate, [0, 0, 0], [0.32, 0.04, 0.32], 0.4);
-    const food = item.stage === 'plated' && item.dish === 'soup' ? COL.soup
-      : item.ingredient === 'tomato' ? COL.tomato
+    const food = item.ingredient === 'tomato' ? COL.tomato
       : item.ingredient === 'meat' ? COL.meatCooked : COL.pasta;
     add(GEO.sphere, food, [0, 0.08, 0], [0.2, 0.13, 0.2], 0.5);
   } else if (item.stage === 'burnt') {

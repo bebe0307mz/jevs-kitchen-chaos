@@ -125,19 +125,19 @@ export default function Broadcast() {
     if (recordArmed) void startRecording();
   }, [recordArmed, startRecording]);
 
-  // Fixed-step sim loop driven by rAF. The kitchen holds (attract mode)
-  // until the shift is started.
+  // Fixed-step sim loop. Driven by setInterval — NOT requestAnimationFrame —
+  // so the kitchen keeps simulating when the window is occluded or the tab
+  // loses focus (rAF starves there and froze the game). Rendering still runs
+  // on R3F's own rAF and simply catches up. Holds until the shift is started.
   useEffect(() => {
-    let raf = 0;
     let last = performance.now();
-    const loop = (now: number) => {
-      const dt = Math.min((now - last) / 1000, 0.1);
+    const id = setInterval(() => {
+      const now = performance.now();
+      const dt = Math.min((now - last) / 1000, 0.25);
       last = now;
       if (startedRef.current) sim.tick(dt);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    }, 33);
+    return () => clearInterval(id);
   }, [sim]);
 
   // HUD snapshot at 10Hz.
