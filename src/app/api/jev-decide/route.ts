@@ -24,6 +24,7 @@ const PRICE_PER_TOKEN = 0.042 / 1_000_000; // $0.042 / 1M input tokens (same lis
 const LLM_MODELS = new Set([
   'anthropic/claude-opus-4.8',
   'anthropic/claude-haiku-4.5',
+  'openai/gpt-5.6-sol',
   'deepseek/deepseek-v4-flash',
 ]);
 

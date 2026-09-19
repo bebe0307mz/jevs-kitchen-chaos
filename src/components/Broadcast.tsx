@@ -22,7 +22,7 @@ const LOCAL_BRAIN_NAME = 'jev-local (emulated)';
 const BRAIN_MODELS = [
   { id: 'jev', label: 'Jev (TypeSafe) · decisions API' },
   { id: 'anthropic/claude-opus-4.8', label: 'Claude Opus 4.8' },
-  { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5 · fast' },
+  { id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol · fast' },
   { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash · fast' },
 ];
 
