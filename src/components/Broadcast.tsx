@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { KitchenSim } from '@/game/sim';
 import { makeBrainFactory } from '@/game/brain';
+import { KitchenAudio } from '@/game/audio';
 import type { SimState } from '@/game/types';
 import { KitchenScene } from '@/components/three/KitchenScene';
 import { TelemetryPanel, TopBar, BottomBar } from '@/components/hud';
@@ -61,6 +62,25 @@ export default function Broadcast() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recStreamRef = useRef<MediaStream | null>(null);
+  const audioRef = useRef<KitchenAudio | null>(null);
+  const [muted, setMuted] = useState(() => {
+    try {
+      return localStorage.getItem('jev-muted') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleMute = useCallback(() => {
+    setMuted((m) => {
+      const next = !m;
+      try {
+        localStorage.setItem('jev-muted', next ? '1' : '0');
+      } catch {}
+      audioRef.current?.setMuted(next);
+      return next;
+    });
+  }, []);
 
   const stopRecording = useCallback(() => {
     const rec = recorderRef.current;
@@ -123,8 +143,16 @@ export default function Broadcast() {
   const startShift = useCallback(() => {
     startedRef.current = true;
     setStarted(true);
+    // Audio must be created inside a user gesture (autoplay policy).
+    try {
+      if (!audioRef.current) audioRef.current = new KitchenAudio();
+      audioRef.current.setMuted(muted);
+      audioRef.current.start();
+    } catch {}
     if (recordArmed) void startRecording();
-  }, [recordArmed, startRecording]);
+  }, [recordArmed, startRecording, muted]);
+
+  useEffect(() => () => audioRef.current?.dispose(), []);
 
   // Fixed-step sim loop. Driven by setInterval — NOT requestAnimationFrame —
   // so the kitchen keeps simulating when the window is occluded or the tab
@@ -141,9 +169,12 @@ export default function Broadcast() {
     return () => clearInterval(id);
   }, [sim]);
 
-  // HUD snapshot at 10Hz.
+  // HUD snapshot at 10Hz (also feeds the audio engine).
   useEffect(() => {
-    const id = setInterval(() => setSnap(snapshotState(sim.state)), 100);
+    const id = setInterval(() => {
+      setSnap(snapshotState(sim.state));
+      audioRef.current?.observe(sim.state);
+    }, 100);
     return () => clearInterval(id);
   }, [sim]);
 
@@ -259,6 +290,15 @@ export default function Broadcast() {
             <div className="rec-chip">
               <span className="rec-chip__dot" /> REC
             </div>
+          )}
+          {started && (
+            <button
+              className="mute-chip"
+              onClick={toggleMute}
+              title={muted ? 'Unmute kitchen audio' : 'Mute kitchen audio'}
+            >
+              {muted ? '🔇' : '🔊'}
+            </button>
           )}
           {shiftOver && (
             <div className="end-overlay">
