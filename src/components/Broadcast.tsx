@@ -340,8 +340,14 @@ export default function Broadcast() {
         <div className="stage">
           <Canvas
             shadows
-            dpr={[1, 2]}
-            gl={{ antialias: true, alpha: true }}
+            dpr={[1, 1.5]}
+            gl={{
+              antialias: true,
+              alpha: true,
+              // Required for flicker-free canvas.captureStream recordings.
+              preserveDrawingBuffer: true,
+              powerPreference: 'high-performance',
+            }}
             camera={{ fov: 38, position: [0, 10.5, 9.5] }}
             style={{ position: 'absolute', inset: 0 }}
           >

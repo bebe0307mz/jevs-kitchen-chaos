@@ -21,18 +21,20 @@ import { Chef } from './Chef';
 
 const CAM_BASE = new THREE.Vector3(0, 13.2, 7.4);
 const LOOK_AT = new THREE.Vector3(0, 0, -0.7);
+// Idle sway: kept *barely* perceptible — anything larger reads as the whole
+// screen shaking rather than cinematic drift.
+const SWAY = { x: 0.03, y: 0.015, z: 0.02 };
 
 function Rig() {
   const camRef = useRef<THREE.PerspectiveCamera>(null);
-  const { set } = useThree();
   useFrame(({ clock }) => {
     const cam = camRef.current;
     if (!cam) return;
     const t = clock.elapsedTime;
-    // extremely subtle idle sway (±0.15 drift, slow)
-    cam.position.x = CAM_BASE.x + Math.sin(t * 0.22) * 0.15;
-    cam.position.y = CAM_BASE.y + Math.sin(t * 0.17 + 1.3) * 0.08;
-    cam.position.z = CAM_BASE.z + Math.cos(t * 0.19) * 0.1;
+    // extremely subtle idle sway
+    cam.position.x = CAM_BASE.x + Math.sin(t * 0.22) * SWAY.x;
+    cam.position.y = CAM_BASE.y + Math.sin(t * 0.17 + 1.3) * SWAY.y;
+    cam.position.z = CAM_BASE.z + Math.cos(t * 0.19) * SWAY.z;
     cam.lookAt(LOOK_AT);
   });
   return (
@@ -45,7 +47,6 @@ function Rig() {
       position={[CAM_BASE.x, CAM_BASE.y, CAM_BASE.z]}
       onUpdate={(c) => {
         c.lookAt(LOOK_AT);
-        set({ camera: c });
       }}
     />
   );
