@@ -218,7 +218,7 @@ export class RemoteJevBrain implements JevBrain {
       const decision = this.parse(req, data, latencyMs);
       if (!decision) return this.failover(req);
       breaker.failures = 0;
-      return decision;
+      return Object.assign(decision, { source: 'live' });
     } catch {
       return this.failover(req);
     }
@@ -230,7 +230,9 @@ export class RemoteJevBrain implements JevBrain {
       breaker.openUntil = Date.now() + this.breakerCooldownMs;
       breaker.failures = 0;
     }
-    return this.fallback.decide(req);
+    return this.fallback
+      .decide(req)
+      .then((d) => Object.assign(d, { source: 'fallback' }));
   }
 
   private parse(
