@@ -166,11 +166,11 @@ export class LocalJevBrain implements JevBrain {
 }
 
 // Shared circuit breaker across all four chefs' RemoteJevBrain instances:
-// after 3 consecutive gateway failures (e.g. free-tier rate limiting) we stop
-// paying the failed round trip and run local for a cooldown, then probe again.
+// after consecutive failures we stop paying the failed round trip and run
+// local for a cooldown, then probe again. LLM benchmark brains get a much
+// softer breaker — the fair penalty for a slow model is idle chefs, not
+// silent substitution by the local heuristic (which poisons the benchmark).
 const breaker = { failures: 0, openUntil: 0 };
-const BREAKER_THRESHOLD = 3;
-const BREAKER_COOLDOWN_MS = 20_000;
 
 export class RemoteJevBrain implements JevBrain {
   readonly name: string;
@@ -182,6 +182,13 @@ export class RemoteJevBrain implements JevBrain {
     private brainModel: string = 'jev',
   ) {
     this.name = brainModel === 'jev' ? 'typesafe-ai/jev' : brainModel;
+  }
+
+  private get breakerThreshold() {
+    return this.brainModel === 'jev' ? 3 : 8;
+  }
+  private get breakerCooldownMs() {
+    return this.brainModel === 'jev' ? 20_000 : 4_000;
   }
 
   async decide(req: DecisionRequest): Promise<JevDecision> {
@@ -219,8 +226,8 @@ export class RemoteJevBrain implements JevBrain {
 
   private failover(req: DecisionRequest): Promise<JevDecision> {
     breaker.failures++;
-    if (breaker.failures >= BREAKER_THRESHOLD) {
-      breaker.openUntil = Date.now() + BREAKER_COOLDOWN_MS;
+    if (breaker.failures >= this.breakerThreshold) {
+      breaker.openUntil = Date.now() + this.breakerCooldownMs;
       breaker.failures = 0;
     }
     return this.fallback.decide(req);
